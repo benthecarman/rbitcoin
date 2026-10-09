@@ -238,7 +238,8 @@ pub fn validate_block_structure_with_pres(
         check_bip34_coinbase(&block.txdata[0], ctx.height.0)?;
     }
 
-    // Only money-range gate. `money_range_out_sum` casts a sum that passed here.
+    // Money-range gate on the precompute path. `assemble_tx_value_out` applies
+    // the same per-output check when a tx has no precompute row.
     for (tx, p) in block.txdata.iter().zip(pres.iter()) {
         for o in &tx.output {
             if exceeds_max_money(o.value.to_sat()) {
@@ -608,25 +609,21 @@ pub(crate) fn check_bip34_coinbase(
 /// Serialize `height` the same way Core pushes it into the coinbase scriptSig.
 #[must_use]
 pub fn bip34_height_script(height: u32) -> Vec<u8> {
-    let n = height as i64;
-    if n == 0 {
+    if height == 0 {
         return vec![0x00];
     }
-    if (1..=16).contains(&n) {
-        return vec![0x50 + n as u8];
+    if (1..=16).contains(&height) {
+        return vec![0x50 + height as u8];
     }
+    // Height is at least 17, so the little-endian body is never empty.
     let mut num = Vec::new();
-    let mut abs = n;
-    while abs > 0 {
-        num.push((abs & 0xff) as u8);
-        abs >>= 8;
+    let mut n = height;
+    while n > 0 {
+        num.push((n & 0xff) as u8);
+        n >>= 8;
     }
-    if let Some(last) = num.last() {
-        if last & 0x80 != 0 {
-            num.push(0x00);
-        }
-    } else {
-        num.push(0);
+    if num.last().unwrap() & 0x80 != 0 {
+        num.push(0x00);
     }
     let mut out = Vec::with_capacity(1 + num.len());
     out.push(num.len() as u8);
@@ -1331,13 +1328,13 @@ fn should_use_pres(ti: usize, len: usize) -> bool {
     ti < len
 }
 
-/// Core `MAX_MONEY` (21_000_000 BTC). This is the money-range predicate
-/// `validate_block_structure_with_pres` uses for each output and for
-/// `TxPrecompute::out_sum`.
+/// Core `MAX_MONEY` (21_000_000 BTC). Structure validation uses this for
+/// each output and for `TxPrecompute::out_sum`. The no-precompute value sum
+/// uses it for each output too.
 ///
-/// `Amount::MAX_MONEY` fits in `i64`, so a sum this returns false for cannot
-/// become negative when `money_range_out_sum` casts it. That cast is not a
-/// second range check.
+/// `Amount::MAX_MONEY` fits in `i64`, so a value this returns false for
+/// cannot become negative when `money_range_out_sum` or
+/// `assemble_tx_value_out` casts it.
 #[inline]
 fn exceeds_max_money(sats: u64) -> bool {
     sats > Amount::MAX_MONEY.to_sat()
@@ -1466,7 +1463,7 @@ fn assemble_tx_value_out(
             for o in &tx.output {
                 let sats_u = o.value.to_sat();
                 if exceeds_max_money(sats_u) {
-                    return Err(ConsensusError::BadTx("bad-txns-vout-toolarge"));
+                    return Err(ConsensusError::BadBlock("bad-txns-vout-toolarge"));
                 }
                 value_out = value_out
                     .checked_add(sats_u as i64)

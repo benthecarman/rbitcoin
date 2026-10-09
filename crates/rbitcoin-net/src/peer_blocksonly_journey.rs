@@ -355,7 +355,7 @@ fn force_announce_picks_peers(
     assert_eq!(tx_invs(&mut eq_ann), vec![relayed.compute_wtxid()]);
     assert!(
         hi_ann.try_recv().is_err(),
-        "a fee above the filter is not announced"
+        "a filter above the fee is not announced"
     );
 
     let due_equal = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
@@ -373,7 +373,7 @@ fn force_announce_picks_peers(
     assert_eq!(tx_invs(&mut due_eq_rx), vec![relayed.compute_wtxid()]);
     assert!(
         due_hi_rx.try_recv().is_err(),
-        "periodic inv skips a fee above the filter"
+        "periodic inv skips a filter above the fee"
     );
 
     let force_equal = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
@@ -386,7 +386,7 @@ fn force_announce_picks_peers(
     assert_eq!(tx_invs(&mut force_equal_rx), vec![relayed.compute_wtxid()]);
     assert!(
         force_above_rx.try_recv().is_err(),
-        "force relay skips a fee above the filter"
+        "force relay skips a filter above the fee"
     );
 
     mp.set_isolated_broadcast(true);

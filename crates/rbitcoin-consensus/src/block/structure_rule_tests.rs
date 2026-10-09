@@ -2851,7 +2851,10 @@ fn assemble_without_pres_sums_zero_and_rejects_over_max() {
         super::assemble_tx_value_out(&one(max_money), 0, None).unwrap(),
         max_money as i64
     );
-    assert!(super::assemble_tx_value_out(&one(max_money + 1), 0, None).is_err());
+    assert!(matches!(
+        super::assemble_tx_value_out(&one(max_money + 1), 0, None),
+        Err(ConsensusError::BadBlock("bad-txns-vout-toolarge"))
+    ));
 }
 
 #[test]
