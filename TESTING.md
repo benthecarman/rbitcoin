@@ -137,6 +137,10 @@ reads it; rustup users export it). Override coverage dir:
 Cargo incremental stays on in `target/dev`. Stale objects: `cargo clean -p
 <crate>` or wipe the silo.
 
+Dev and test builds keep line tables on workspace crates and omit debug info
+on dependencies (root `Cargo.toml` `[profile.dev]` / `[profile.test]`). Panic
+backtraces still name the file and line. Release profiles are unchanged.
+
 Humans, CI, and `rearden-grok[bot]` keep `$PWD/target/dev` (this table,
 CONTRIBUTING, `shell.nix` / `flake.nix`). The nix hook sets that path when
 `CARGO_TARGET_DIR` is unset. `rearden-grok[bot]` on the operator VM, one
