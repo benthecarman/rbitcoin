@@ -1581,6 +1581,80 @@ pub(crate) fn catch_up_after_err(tip: u32, index_is_tip: bool, shutdown: bool) -
     }
 }
 
+/// Skip catch-up only for a current tip with no heavier stored header chain.
+///
+/// `peer_advertised_height` is accepted and ignored. How far a peer says it
+/// has synced is not a reason to stay in catch-up or to skip it.
+pub(crate) fn startup_skips_catch_up(
+    meets_minimum_chain_work: bool,
+    tip_age_secs: Option<u64>,
+    max_tip_age_secs: u64,
+    heavier_local_chain: bool,
+    peer_advertised_height: u32,
+) -> bool {
+    let _ = peer_advertised_height;
+    let Some(age) = tip_age_secs else {
+        return false;
+    };
+    meets_minimum_chain_work && age <= max_tip_age_secs && !heavier_local_chain
+}
+
+fn tip_age_secs(hub: &ChainHub) -> Option<u64> {
+    let header = hub.tip_header()?;
+    Some(hub.clock.now_secs().saturating_sub(u64::from(header.time)))
+}
+
+/// Non-empty resume path: an extension or a sibling with more work than the
+/// tip. A missing tip or a read error stays in catch-up.
+fn stored_header_chain_heavier_than_tip(hub: &ChainHub) -> bool {
+    use bitcoin::hashes::Hash;
+    let Some(tip_hash) = hub.tip_hash() else {
+        return true;
+    };
+    let Some(tip_h) = hub.tip_height() else {
+        return true;
+    };
+    match hub
+        .query
+        .resume_work_path_after_tip(tip_hash.to_byte_array(), tip_h, 1)
+    {
+        Ok(path) => !path.is_empty(),
+        Err(e) => {
+            warn!("node: startup header scan failed: {e} — catch-up");
+            true
+        }
+    }
+}
+
+fn startup_skip_from_hub(hub: &ChainHub) -> bool {
+    let age = tip_age_secs(hub);
+    let max_age = hub.max_tip_age_secs();
+    // The header walk runs only when age and work would already skip, so a
+    // stale or low-work tip is scanned once inside catch-up.
+    let meets = if age.is_some_and(|secs| secs <= max_age) {
+        hub.meets_minimum_chain_work()
+    } else {
+        false
+    };
+    let current = startup_skips_catch_up(meets, age, max_age, false, 0);
+    let heavier = if current {
+        stored_header_chain_heavier_than_tip(hub)
+    } else {
+        false
+    };
+    startup_skips_catch_up(meets, age, max_age, heavier, 0)
+}
+
+async fn startup_follows_without_catch_up(hub: &Arc<ChainHub>) -> bool {
+    let hub = Arc::clone(hub);
+    tokio::task::spawn_blocking(move || {
+        let _region = BlockingRegion::enter();
+        startup_skip_from_hub(&hub)
+    })
+    .await
+    .unwrap_or(false)
+}
+
 fn apply_startup_index_mode(
     query: &Query,
     config: &NodeConfig,
@@ -1646,6 +1720,10 @@ async fn run_ibd_or_skip(
     }
     if shutdown.requested() {
         return CatchUp::Incomplete;
+    }
+    if startup_follows_without_catch_up(&node.hub).await {
+        info!("node: stored tip is current — tip follow (skip catch-up)");
+        return CatchUp::complete();
     }
     let target_peers = max_out.clamp(8, 32);
     // Window, per-peer cap, and stall come from `IbdConfig::default`.
@@ -2017,7 +2095,9 @@ fn sh_tip_ready_gates(query: &Query) -> TipModeGates {
 ///
 /// **Preconditions (enforced by IBD, not repaired here):** Direct catch-up already
 /// wrote durable **`tx.head`** (archive) and **spend annotations** (confirm).
-/// Incomplete IBD must not call this (`CatchUp::Complete` only after full horizon).
+/// Incomplete IBD must not call this. `CatchUp::Complete` is a finished
+/// horizon, or a stored tip already inside min chain work and max tip age
+/// with no heavier local header chain.
 ///
 /// **SH methods (exactly two):**
 /// - Durable head: stay/flip [`IndexMode::Tip`], discard leftover runs;
@@ -2651,6 +2731,39 @@ mod tests {
             catch_up_with_connect(CatchUp::Incomplete, true, false, 50),
             CatchUp::Incomplete
         );
+    }
+
+    #[test]
+    fn startup_skips_catch_up_only_when_the_tip_is_current_and_no_heavier_chain() {
+        const DAY: u64 = 24 * 60 * 60;
+        // A mainnet restart advertised this height while the walk proved nothing.
+        const FAR_PEER: u32 = 976_455;
+        // meets work, tip age, configured max age, heavier local chain, peer height, skip.
+        let cases = [
+            (true, Some(0u64), DAY, false, 0u32, true),
+            (true, Some(0), DAY, false, FAR_PEER, true),
+            (true, Some(DAY), DAY, false, 0, true),
+            (true, Some(DAY), DAY, false, FAR_PEER, true),
+            (true, Some(3_600), 3_600, false, FAR_PEER, true),
+            (true, Some(DAY + 1), DAY, false, 0, false),
+            (true, Some(DAY + 1), DAY, false, FAR_PEER, false),
+            (true, Some(3_601), 3_600, false, 0, false),
+            (false, Some(0), DAY, false, 0, false),
+            (false, Some(0), DAY, false, FAR_PEER, false),
+            (true, Some(0), DAY, true, 0, false),
+            (true, Some(0), DAY, true, FAR_PEER, false),
+            (true, None, DAY, false, 0, false),
+            (true, None, DAY, false, FAR_PEER, false),
+            (false, Some(DAY + 1), DAY, true, FAR_PEER, false),
+            (true, Some(DAY + 1), DAY, true, 0, false),
+        ];
+        for (meets, age, max_age, heavier, peer_height, skip) in cases {
+            assert_eq!(
+                startup_skips_catch_up(meets, age, max_age, heavier, peer_height),
+                skip,
+                "meets={meets} age={age:?} max={max_age} heavier={heavier} peer={peer_height}"
+            );
+        }
     }
 
     #[test]
