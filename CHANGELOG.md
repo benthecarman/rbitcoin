@@ -30,10 +30,36 @@ GitHub Release: Linux musl (operator) + Windows CRT-static PE + Darwin aarch64.
   skip only on that header path once chain work meets Core
   `nMinimumChainWork`. Signet’s default milestone is 0 (every script). An
   explicit `--milestone HEIGHT` stays height-only.
-- **`getnetworkinfo.version` is 190000** (Core 0.19’s client integer), so
-  typed RPC clients take the modern object. The rbitcoin semver stays in
-  `subversion`. `protocolversion` stays 70016. `--rpc-cookie-file` is HTTP
-  Basic on TCP, beside the bearer token.
+- **Initial sync keeps moving on ordinary connections.** One peer serves
+  headers. The others download blocks, at most 64 blocks or 16 MiB in
+  flight, sized from recent bodies. A peer holding the tip block is
+  replaced only after 5 seconds, and only when a free peer would finish
+  it in half the time. A full serve queue waits out the rest of a
+  `getdata` instead of dropping it.
+- **Consensus checks match Bitcoin Core where they used to disagree.**
+  BIP30 is off only when the header at BIP34 height is that network’s
+  BIP34 block, and it is always on from height 1,983,702. A confirm batch
+  cannot spend an output created by a later block in that batch. The
+  genesis coinbase is not a spendable coin. An empty signature in legacy
+  `CHECKMULTISIG` deletes `OP_0` from scriptCode. A bad copy of a valid
+  block is requested again and is not cached as invalid.
+- **Peers and RPC fail closed under load.** Counts above 50,000 in `inv`,
+  `getdata`, and `notfound` fail decode. Compact-block and block
+  transaction counts are rejected before allocation. The RPC body cap is
+  2 MiB, and a full work queue is HTTP 503 before the handler. A session
+  pauses once its outbound queue passes 4 MiB. An unpaged scripthash join
+  above `--max-sh-creates` (default 10000) is refused.
+- **Wallets, Lightning nodes, and explorers have a setup guide.**
+  `docs/wallets.md` and `docs/lightning.md`. Electrum and Esplora serve
+  Electrum, Sparrow, Liana, Specter, Cake Wallet, BlueWallet, BitBox App,
+  Envoy, and BDK (including Alby Hub). Wasabi’s full-node path uses
+  `getblockfilter` and `--rpc-cookie-file` (HTTP Basic on TCP).
+  `getnetworkinfo.version` stays 190000 (Core 0.19’s client integer); the
+  semver stays in `subversion`. CLN (`bcli` and `sauron`), ldk-node
+  (Esplora, Electrum, or REST), and LND with `bitcoind.rpcpolling` use
+  this node as the chain source. Esplora `/internal/*` on the unix socket
+  is the mempool.space electrs drop-in. `/fee-estimates` keeps the
+  estimator’s precision. `/fees/recommended` and `/ws` are 404.
 - **Feerate uses sigop-adjusted size.** Admission, RBF, eviction, estimates,
   and `-blockmintxfee` use `max(weight, sigop_cost × bytes_per_sigop)`
   (default 20, `--bytes-per-sigop`, `0` disables). A transaction whose sigop
@@ -47,23 +73,19 @@ GitHub Release: Linux musl (operator) + Windows CRT-static PE + Darwin aarch64.
   of individual rates). `estimatesmartfee` returns `{feerate, blocks}`, or
   `{errors, blocks}` with no `feerate` when it has no estimate, and
   `feerate` is at least `mempoolminfee`.
-- **Esplora fee and listen surface.** `/fee-estimates` keeps the estimator’s
-  precision (0.001 sat/vB). `/fees/recommended`, `/ws`, and `/v1/ws` are
-  404. `/internal/*` answers only on the unix socket.
-- **Block filters and tweaks catch up after IBD.** They do not build during
-  initial download. A restart gap of at most 2,016 blocks is sealed before
-  confirm goes live; a larger gap is built by `rbtc-idx-wb` (`index: build`).
-  With `--datadir-cold`, `blockfilter` and `sp_tweaks` must sit on the cold
-  store. `NODE_COMPACT_FILTERS` is advertised once filters reach the tip.
+- **Block filters and silent-payment tweaks build during IBD, and after
+  it when they are behind.** With the index on from the start, each
+  confirmed block is built on the script pool and appended on the confirm
+  write. A restart gap of at most 2,016 blocks is sealed before confirm.
+  A larger gap, including an index enabled on an already synced datadir,
+  is built afterward by `rbtc-idx-wb` (`index: build`) and does not hold
+  the node in initial download. `NODE_COMPACT_FILTERS` is advertised once
+  filters reach the tip. With `--datadir-cold`, `blockfilter` and
+  `sp_tweaks` must sit on the cold store.
 - **Spend annotations recover after a crash past the tip seal.** A missing
   spent slot stays unspent until open replays above the `spend_durable`
   marker. `rbtc-spend-sync` checkpoints about every ten minutes, and once
   more on shutdown.
-- **Stratum v2 template provider is off by default.** `--sv2-tp-listen`
-  serves templates, transaction fetches, and solved-block submit over Noise.
-- **BIP30** is enforced unless the header at BIP34 height is that network’s
-  BIP34 hash, and always from height 1,983,702. Signet and regtest check
-  every block.
 
 ### Fixed
 
@@ -1352,13 +1374,7 @@ admission does not change: it still runs with consensus flags only.
   is cast. Thanks to @Hero-Gamer.
 
 
-- **`--block-filter-index` does not run during IBD.** After catch-up, a
-  gap through the tip of at most 2,016 heights (one IBD write drain:
-  queue 14 × confirm cap 144) is sealed at startup and live append turns
-  on. A larger gap is built by `rbtc-idx-wb`, which logs `index: build`
-  and reads stored chain data. Follow, relay, and Electrum do not wait
-  for it. Shutdown during that build is prompt; the next start resumes.
-  Enabling the index on an existing datadir does not stall IBD exit.
+- **Block filters and silent-payment tweaks build as blocks confirm, or after a large gap.** With the index already at the tip, including a fresh sync, each block is built on the script pool after script verification and appended on the confirm write. At startup a gap through the tip of at most 2,016 heights (one IBD write drain: queue 14 × confirm cap 144) is sealed before confirm and live append turns on. A larger gap stays off the confirm path and is built after catch-up by `rbtc-idx-wb`, which logs `index: build` and reads stored chain data. Follow, relay, and Electrum do not wait for that build. Shutdown during it is prompt; the next start resumes. Enabling the index on an existing datadir does not stall IBD exit.
 - **Filters build on `--prune-seqsigwit` nodes.** They read output and
   spent-prevout scripts from stored chain data, not reconstructed blocks.
 - **Filter storage is indexed.** Any height's filter is two reads; filter
