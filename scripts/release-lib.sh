@@ -123,9 +123,10 @@ release_set_nix_version() {
 }
 
 # Fold changelog.d/*.md into ## [Unreleased], then delete those files.
-# README.md is the pointer, not a note. thanks.md is the one-shot release
-# thanks and is not a category fragment. First non-empty line of a fragment
-# is the Keep a Changelog category; the rest is the bullet text.
+# README.md is the pointer, not a note. thanks.md is the one-shot thanks
+# paragraph for ### Highlights, not a category fragment. First non-empty
+# line of a fragment is the Keep a Changelog category; the rest is the
+# bullet text.
 release_changelog_absorb_fragments() {
   local dir="$ROOT/changelog.d"
   [[ -d "$dir" ]] || return 0
@@ -192,13 +193,14 @@ release_changelog_insert_category() {
   mv "$tmp" "$file"
 }
 
-# changelog.d/thanks.md is one release only. Fold it into ## [Unreleased]
-# as ### Thanks, then delete it. Later cuts have nothing to repeat.
-release_changelog_absorb_thanks() {
+# changelog.d/thanks.md is one release only. Print its paragraph and delete
+# it. The cut places that paragraph under ### Highlights. It is not a
+# bullet and there is no ### Thanks section. Later cuts have nothing to repeat.
+release_changelog_take_thanks() {
   local f="$ROOT/changelog.d/thanks.md"
   [[ -f "$f" ]] || return 0
   local file="$ROOT/CHANGELOG.md"
-  local start end tmp
+  local start end
   start="$(grep -n '^## \[Unreleased\]' "$file" | head -1 | cut -d: -f1)"
   [[ -n "$start" ]] || release_die "CHANGELOG.md has no ## [Unreleased] heading"
   end="$(awk -v s="$start" 'NR > s && /^## / { print NR; exit }' "$file")"
@@ -206,24 +208,28 @@ release_changelog_absorb_thanks() {
   if awk -v s="$start" -v e="$end" 'NR > s && NR < e && /^### Thanks$/ { found = 1 } END { exit !found }' "$file"; then
     release_die "CHANGELOG.md already has ### Thanks under Unreleased"
   fi
-  tmp="$(mktemp "${TMPDIR:-/tmp}/rbitcoin-clthanks.XXXXXX")"
-  head -n "$((end - 1))" "$file" >"$tmp"
-  printf '\n### Thanks\n\n' >>"$tmp"
-  cat "$f" >>"$tmp"
-  printf '\n' >>"$tmp"
-  tail -n "+$end" "$file" >>"$tmp"
-  mv "$tmp" "$file"
+  cat "$f"
   rm -f "$f"
 }
 
 release_cut_changelog_ship() {
   local ver="$1"
   local date="$2"
-  local tmp
-  release_changelog_absorb_thanks
+  local tmp thanksf
+  thanksf="$(mktemp "${TMPDIR:-/tmp}/rbitcoin-clthanks.XXXXXX")"
+  release_changelog_take_thanks >"$thanksf"
   release_changelog_absorb_fragments
   tmp="$(mktemp "${TMPDIR:-/tmp}/rbitcoin-cl.XXXXXX")"
-  awk -v ver="$ver" -v date="$date" '
+  awk -v ver="$ver" -v date="$date" -v tf="$thanksf" '
+    function emit_thanks(   line, any) {
+      any = 0
+      while ((getline line < tf) > 0) {
+        print line
+        any = 1
+      }
+      close(tf)
+      if (any) print ""
+    }
     /^## \[Unreleased\]/ {
       print
       print ""
@@ -231,11 +237,13 @@ release_cut_changelog_ship() {
       print ""
       print "### Highlights"
       print ""
+      emit_thanks()
       next
     }
     { print }
   ' "$ROOT/CHANGELOG.md" >"$tmp"
   mv "$tmp" "$ROOT/CHANGELOG.md"
+  rm -f "$thanksf"
 }
 
 release_cut_changelog_dev_next() {

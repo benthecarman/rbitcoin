@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Brief GitHub Release notes: platform blurb + CHANGELOG ### Highlights.
-# Full Keep a Changelog body stays in CHANGELOG.md.
+# Thanks live in that section. A committer not already named there is
+# thanked in the same block. Full Keep a Changelog body stays in CHANGELOG.md.
 set -euo pipefail
 
 ROOT=""
@@ -109,29 +110,8 @@ release_thanks_sentence() {
   printf '%s\n' "$rest"
 }
 
-release_version_thanks() {
-  awk -v ver="$VER" '
-    $0 ~ "^## \\[" ver "\\]" { grab = 1; next }
-    grab && /^## / { exit }
-    grab && /^### Thanks[[:space:]]*$/ { insec = 1; next }
-    grab && insec && /^### / { exit }
-    insec { print }
-  ' "$ROOT/CHANGELOG.md"
-}
-
 hl="$(release_changelog_highlights "$VER" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')"
-once="$(release_version_thanks | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')"
-authors="$(release_thanks_sentence "$once" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')"
-thanks=""
-if [[ -n "$once" && -n "$authors" ]]; then
-  thanks="${once}
-
-${authors}"
-elif [[ -n "$once" ]]; then
-  thanks="$once"
-elif [[ -n "$authors" ]]; then
-  thanks="$authors"
-fi
+authors="$(release_thanks_sentence "$hl" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')"
 note="rbitcoin v${VER}
 
 Linux **musl x86_64** is the operator binary (statically linked).
@@ -142,11 +122,9 @@ codesigned, **not notarized** (\`xattr -d com.apple.quarantine\`).
 
 ${hl}
 "
-if [[ -n "$thanks" ]]; then
+if [[ -n "$authors" ]]; then
   note="${note}
-### Thanks
-
-${thanks}
+${authors}
 "
 fi
 note="${note}

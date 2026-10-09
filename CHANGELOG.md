@@ -87,6 +87,10 @@ GitHub Release: Linux musl (operator) + Windows CRT-static PE + Darwin aarch64.
   marker. `rbtc-spend-sync` checkpoints about every ten minutes, and once
   more on shutdown.
 
+Thanks to @otaliptus for the security review, and to @dergoegge, @rob1ham, and @1440000bytes for earlier findings.
+
+Thanks to @Hero-Gamer for changes in this release.
+
 ### Fixed
 
 - **`-blockmintxfee` floors whole chunks:** `getblocktemplate` / `generate`
@@ -1720,11 +1724,6 @@ admission does not change: it still runs with consensus flags only.
   create heights by foreign-key span when every block in the batch is
   contiguous. The tip event carries the wire header already validated on
   the write path.
-
-### Thanks
-
-Thanks to @otaliptus for the security review, and to @dergoegge, @rob1ham, and @1440000bytes for earlier findings.
-
 
 ### Added
 
