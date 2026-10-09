@@ -216,7 +216,18 @@ fn height_zero_timelock_block(sequence: u32) -> bitcoin::Block {
     block
 }
 
-/// Height-type locks ignore coin MTP (write path may leave mtps as 0).
+/// Exactly 500_000_000 is a timestamp. One below the threshold is a height.
+#[test]
+fn locktime_at_threshold_is_a_timestamp() {
+    let t = LOCKTIME_THRESHOLD;
+    let tx = bare_tx(1, LockTime::from_time(t).unwrap(), Sequence::ZERO);
+    assert!(
+        is_final_tx(&tx, 1, t + 1),
+        "exactly {t} compares as a time, so a later cutoff is final"
+    );
+    assert!(!is_final_tx(&tx, 1, t));
+}
+
 #[test]
 fn bip68_height_type_ignores_zero_mtp() {
     let tx = bare_tx(2, LockTime::ZERO, Sequence::from_consensus(10));
@@ -224,4 +235,109 @@ fn bip68_height_type_ignores_zero_mtp() {
     // bogus MTP must not affect height-type check
     assert!(sequence_locks_satisfied(&tx, &[100], &[u32::MAX], 110, 0));
     assert!(!sequence_locks_satisfied(&tx, &[100], &[0], 109, 0));
+}
+
+fn seq_tx(seqs: &[u32]) -> Transaction {
+    Transaction {
+        version: bitcoin::transaction::Version(2),
+        lock_time: LockTime::ZERO,
+        input: seqs
+            .iter()
+            .map(|seq| TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::from_consensus(*seq),
+                witness: Witness::new(),
+            })
+            .collect(),
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    }
+}
+
+fn csv_block(txs: Vec<Transaction>) -> bitcoin::Block {
+    use bitcoin::block::{Header, Version};
+    use bitcoin::hashes::Hash;
+    use bitcoin::{Block, BlockHash, CompactTarget, TxMerkleNode};
+    let mut block = Block {
+        header: Header {
+            version: Version::from_consensus(1),
+            prev_blockhash: BlockHash::from_byte_array([0; 32]),
+            merkle_root: TxMerkleNode::from_byte_array([0; 32]),
+            time: 1_231_006_505,
+            bits: CompactTarget::from_consensus(0x1d00_ffff),
+            nonce: 0,
+        },
+        txdata: txs,
+    };
+    block.header.merkle_root = block.compute_merkle_root().unwrap();
+    block
+}
+
+/// Three two-input txs must connect. `si * n_in` false-rejects the third.
+#[test]
+fn structural_bip68_multi_input_block_connects() {
+    let params = Box::leak(Box::new(crate::params::ChainParams::regtest()));
+    let ctx = super::ValidationContext::at(
+        params,
+        rbitcoin_primitives::Height(1),
+        crate::milestone::Milestone::NONE,
+    );
+    let (_dir, query) = rbitcoin_query::testutil::tiny_query_labeled("bip68-multi");
+    let coinbase = bare_tx(1, LockTime::ZERO, Sequence::MAX);
+    let spend = |seq: u32| seq_tx(&[seq, seq]);
+    let block = csv_block(vec![
+        coinbase,
+        spend(u32::MAX),
+        spend(u32::MAX),
+        spend(u32::MAX),
+    ]);
+    let spends = vec![
+        (
+            [0u8; 32],
+            0u32,
+            rbitcoin_primitives::Fk::NULL,
+            rbitcoin_primitives::Fk::NULL,
+            0u32
+        );
+        6
+    ];
+    let mut cache = rbitcoin_query::U32Map::default();
+    cache.insert(0, 1_000);
+    super::structural_bip68(
+        &query,
+        &block,
+        &ctx,
+        &spends,
+        &rbitcoin_query::FkMap::default(),
+        &mut cache,
+    )
+    .expect("a well-formed multi-input block passes the spend cursor");
+}
+
+/// Height-type CSV does not prefetch a median. A missing parent header must
+/// still pass when the block's own previous median is already cached.
+#[test]
+fn structural_bip68_height_lock_skips_missing_coin_mtp() {
+    let params = Box::leak(Box::new(crate::params::ChainParams::regtest()));
+    let ctx = super::ValidationContext::at(
+        params,
+        rbitcoin_primitives::Height(6),
+        crate::milestone::Milestone::NONE,
+    );
+    let (_dir, query) = rbitcoin_query::testutil::tiny_query_labeled("bip68-height-mtp");
+    let create = rbitcoin_primitives::Fk(3);
+    let mut create_heights = rbitcoin_query::FkMap::default();
+    create_heights.insert(create, 5);
+    let block = csv_block(vec![
+        bare_tx(1, LockTime::ZERO, Sequence::MAX),
+        seq_tx(&[0]),
+    ]);
+    let spends = [([0u8; 32], 0u32, rbitcoin_primitives::Fk::NULL, create, 0u32)];
+    let mut cache = rbitcoin_query::U32Map::default();
+    cache.insert(5, 1_500_000);
+    super::structural_bip68(&query, &block, &ctx, &spends, &create_heights, &mut cache)
+        .expect("height-type lock must not read the coin median");
 }

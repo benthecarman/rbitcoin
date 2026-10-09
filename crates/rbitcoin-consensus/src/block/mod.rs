@@ -617,20 +617,13 @@ pub fn bip34_height_script(height: u32) -> Vec<u8> {
     }
     let mut num = Vec::new();
     let mut abs = n;
-    let neg = abs < 0;
-    if neg {
-        abs = -abs;
-    }
     while abs > 0 {
         num.push((abs & 0xff) as u8);
         abs >>= 8;
     }
     if let Some(last) = num.last() {
         if last & 0x80 != 0 {
-            num.push(if neg { 0x80 } else { 0x00 });
-        } else if neg {
-            let i = num.len() - 1;
-            num[i] |= 0x80;
+            num.push(0x00);
         }
     } else {
         num.push(0);
@@ -1471,12 +1464,12 @@ fn assemble_tx_value_out(
         None => {
             let mut value_out = 0i64;
             for o in &tx.output {
-                let sats = o.value.to_sat() as i64;
-                if sats < 0 {
-                    return Err(ConsensusError::BadTx("negative output"));
+                let sats_u = o.value.to_sat();
+                if exceeds_max_money(sats_u) {
+                    return Err(ConsensusError::BadTx("bad-txns-vout-toolarge"));
                 }
                 value_out = value_out
-                    .checked_add(sats)
+                    .checked_add(sats_u as i64)
                     .ok_or(ConsensusError::BadTx("value out overflow"))?;
             }
             Ok(value_out)

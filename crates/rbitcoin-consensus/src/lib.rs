@@ -523,14 +523,15 @@ mod coverage_tests {
         let params = ChainParams::regtest();
         let ms = Milestone::height(1_000_000);
         let genesis = genesis_block(&params);
-        accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, ms).unwrap();
+        let gen_fk = accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, ms).unwrap();
 
         let b1 = mine_regtest(genesis.block_hash(), genesis.header.time + 600, 1, vec![]);
         // prepare helpers stay (CPU-side); confirm is sole Class A.
         let (_hr, _txs) = prepare_block_for_archive(&q, &params, &b1).unwrap();
         accept_and_connect_block(&q, &params, Height(1), &b1, ms).unwrap();
-        // already-have prepare after connect
-        let _ = prepare_block_for_archive(&q, &params, &b1).unwrap();
+        // already-have prepare after connect keeps the parent fk
+        let (hr, _) = prepare_block_for_archive(&q, &params, &b1).unwrap();
+        assert_eq!(hr.prev_fk, gen_fk);
 
         let _ = std::fs::remove_dir_all(&path);
     }

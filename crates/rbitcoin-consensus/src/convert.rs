@@ -82,9 +82,7 @@ fn tx_to_apply(tx: &Transaction, txid: [u8; 32]) -> Result<TxApply, ConsensusErr
         .input
         .iter()
         .map(|inp| {
-            let is_cb = inp.previous_output.is_null()
-                || (inp.previous_output.txid.to_byte_array() == [0u8; 32]
-                    && inp.previous_output.vout == u32::MAX);
+            let is_cb = inp.previous_output.is_null();
             InputRecord {
                 prev_txid: inp.previous_output.txid.to_byte_array(),
                 // Archive resolve fills create_fk before pack; coinbase stays NULL.
@@ -247,6 +245,27 @@ mod tests {
         };
         let apply = tx_to_apply(&non_cb, non_cb.compute_txid().to_byte_array()).unwrap();
         assert_eq!(apply.inputs[0].prev_index, 3);
+        // A zero txid with a real vout is not a coinbase. `OutPoint::is_null`
+        // is the whole marker (txid 0 and vout MAX).
+        let zero_txid = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let apply = tx_to_apply(&zero_txid, zero_txid.compute_txid().to_byte_array()).unwrap();
+        assert_eq!(apply.inputs[0].prev_index, 0);
     }
 
     /// Write encode must bind each stamped spend edge to the wire prevout it
