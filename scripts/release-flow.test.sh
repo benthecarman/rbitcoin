@@ -197,6 +197,16 @@ GIT_AUTHOR_EMAIL='freedom@reardencode.com' \
 GIT_COMMITTER_NAME='Brandon Black' \
 GIT_COMMITTER_EMAIL='freedom@reardencode.com' \
   git_c -C "$MINOR" commit -q --allow-empty -m 'maintainer change'
+GIT_AUTHOR_NAME='Brandon Black' \
+GIT_AUTHOR_EMAIL='freedom@reardencode.com' \
+GIT_COMMITTER_NAME='Brandon Black' \
+GIT_COMMITTER_EMAIL='freedom@reardencode.com' \
+  git_c -C "$MINOR" commit -q --allow-empty -m 'Merge pull request #9 from average-gary/mempool/x'
+GIT_AUTHOR_NAME='Brandon Black' \
+GIT_AUTHOR_EMAIL='freedom@reardencode.com' \
+GIT_COMMITTER_NAME='Brandon Black' \
+GIT_COMMITTER_EMAIL='freedom@reardencode.com' \
+  git_c -C "$MINOR" commit -q --allow-empty -m 'Merge pull request #8 from reardencode/docs/x'
 out="$(bash "$NOTES" --root "$MINOR")"
 assert_ok "release-notes include Highlights bullet" \
   grep -q 'operator-facing ship note' <<<"$out"
@@ -204,6 +214,8 @@ assert_ok "release-notes without a one-shot file do not thank @otaliptus" \
   bash -c "! grep -q '@otaliptus' <<<'$out'"
 assert_ok "release-notes thank another external login" \
   grep -q '@Hero-Gamer' <<<"$out"
+assert_ok "release-notes thank the fork on a merge commit" \
+  grep -q '@average-gary' <<<"$out"
 assert_ok "release-notes keep that thanks inside Highlights" \
   bash -c "! grep -q '^### Thanks$' <<<'$out'"
 assert_ok "release-notes omit the bot and the maintainer" \

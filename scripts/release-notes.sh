@@ -76,8 +76,29 @@ release_thanks_sentence() {
     range="HEAD"
   fi
   local -a others=()
+  release_keep_login() {
+    local login="$1"
+    [[ -n "$login" ]] || return 0
+    case "$login" in
+      reardencode|rearden-grok|rearden-grok\[bot\]|dependabot|dependabot\[bot\])
+        return 0
+        ;;
+    esac
+    if [[ -n "$skip" ]] && printf '%s' "$skip" | grep -q "@${login}"; then
+      return 0
+    fi
+    local seen=0 o
+    for o in "${others[@]+"${others[@]}"}"; do
+      [[ "$o" == "$login" ]] && seen=1
+    done
+    [[ "$seen" -eq 0 ]] && others+=("$login")
+  }
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
+    if [[ "$line" =~ ^Merge\ pull\ request\ \#[0-9]+\ from\ ([A-Za-z0-9-]+)/ ]]; then
+      release_keep_login "${BASH_REMATCH[1]}"
+      continue
+    fi
     if [[ "$line" == Co-authored-by:* ]]; then
       email="${line##*<}"
       email="${email%>}"
@@ -85,16 +106,8 @@ release_thanks_sentence() {
       email="$line"
     fi
     login="$(release_login_from_email "$email" || true)"
-    [[ -n "$login" ]] || continue
-    if [[ -n "$skip" ]] && printf '%s' "$skip" | grep -q "@${login}"; then
-      continue
-    fi
-    local seen=0 o
-    for o in "${others[@]+"${others[@]}"}"; do
-      [[ "$o" == "$login" ]] && seen=1
-    done
-    [[ "$seen" -eq 0 ]] && others+=("$login")
-  done < <(git log "$range" --format='%ae%n%b')
+    release_keep_login "$login"
+  done < <(git log "$range" --format='%ae%n%s%n%b')
   local rest=""
   if ((${#others[@]})); then
     local joined=""

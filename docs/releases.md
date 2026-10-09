@@ -180,7 +180,9 @@ From current `origin/master` at `X.Y.99`:
    commit since the previous tag is by someone other than `reardencode`
    and `rearden-grok[bot]`, and that login is not already named there, the
    notes add `Thanks to @login for changes in this release.` in the same
-   block. Edit narrative
+   block. A login counts when its commit email is a GitHub noreply address,
+   or when a merge commit says `from login/`. The maintainer, the bot, and
+   dependabot stay out. Edit narrative
    banners to the new **X.(Y+1).0** (and that `vX.(Y+1).x` will be the
    patch line). Keep the detailed Unreleased body under the new heading.
 3. `./scripts/release-gate.sh` and `./scripts/release-notes.sh` must

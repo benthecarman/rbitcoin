@@ -89,7 +89,7 @@ GitHub Release: Linux musl (operator) + Windows CRT-static PE + Darwin aarch64.
 
 Thanks to @otaliptus for the security review, and to @dergoegge, @rob1ham, and @1440000bytes for earlier findings.
 
-Thanks to @Hero-Gamer for changes in this release.
+Thanks to @benthecarman, @average-gary, @bobberb, @Hero-Gamer, @bkeroack, @xstoicunicornx, and @RandyMcMillan for changes in this release.
 
 ### Fixed
 
