@@ -976,3 +976,188 @@ async fn work_fork_journey() {
     heavy.shutdown().await;
     light.shutdown().await;
 }
+
+fn startup_cfg(dir: &Path, miner: SocketAddr, max_tip_age: u64) -> NodeConfig {
+    let mut cfg = NodeConfig::default()
+        .with_datadir(dir)
+        .with_network(Network::Regtest)
+        .with_p2p_listen(any_port())
+        .with_tiny_heads();
+    cfg.listen.connect = vec![NetAddr::Ip(miner)];
+    cfg.listen.use_seeds = false;
+    cfg.shindex = false;
+    cfg.rpc.listen = Some(any_port());
+    cfg.max_tip_age_secs = Some(max_tip_age);
+    std::fs::write(dir.join("rpc.token"), "pass").unwrap();
+    cfg
+}
+
+fn regtest_chain(blocks: u32) -> Vec<bitcoin::Block> {
+    let genesis = regtest_genesis();
+    let mut out = vec![genesis.clone()];
+    let mut tip = genesis.block_hash();
+    let mut time = genesis.header.time;
+    for height in 1..=blocks {
+        let block = mine_regtest_block(tip, time.saturating_add(1), height, vec![]);
+        tip = block.block_hash();
+        time = block.header.time;
+        out.push(block);
+    }
+    out
+}
+
+/// One difficulty-1 header under genesis. Its work beats a long easy regtest chain.
+fn plant_deep_heavy_header(q: &Query) {
+    use rbitcoin_store::{block_header_hash, HeaderRecord};
+    let (gfk, genesis) = q.header_at_height(Height(0)).unwrap().unwrap();
+    let version = 1i32;
+    let bits = 0x1d00_ffffu32;
+    let timestamp = genesis.timestamp.saturating_add(1);
+    let nonce = 9u32;
+    let merkle_root = [0x5a; 32];
+    let hash = block_header_hash(version, &genesis.hash, &merkle_root, timestamp, bits, nonce);
+    q.put_header(&HeaderRecord {
+        prev_fk: gfk,
+        version,
+        timestamp,
+        bits,
+        nonce,
+        merkle_root,
+        hash,
+        size: 0,
+        weight: 0,
+    })
+    .unwrap();
+}
+
+type StartupLogs = Vec<(rbitcoin_log::Level, String)>;
+
+fn spawn_run_p2p_logs(
+    cfg: NodeConfig,
+) -> tokio::task::JoinHandle<(Result<(), rbitcoin_node::NodeError>, StartupLogs)> {
+    match std::fs::remove_dir_all(cfg.datadir.path().join("run")) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => panic!("clear published listeners: {e}"),
+    }
+    tokio::task::spawn_blocking(move || {
+        let _block = rbitcoin_net::BlockingRegion::enter();
+        rbitcoin_log::capture_logs(true);
+        let result = tokio::runtime::Handle::current().block_on(run_p2p(cfg));
+        let logs = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
+        (result, logs)
+    })
+}
+
+async fn stop_logged(
+    rpc: SocketAddr,
+    node: tokio::task::JoinHandle<(Result<(), rbitcoin_node::NodeError>, StartupLogs)>,
+) -> StartupLogs {
+    let _ = jsonrpc(rpc, "stop", json!([])).await;
+    match tokio::time::timeout(Duration::from_secs(20), node).await {
+        Ok(Ok((Ok(()), logs))) => logs,
+        Ok(Ok((Err(e), _))) => panic!("run_p2p error after stop: {e}"),
+        Ok(Err(e)) => panic!("run_p2p join: {e}"),
+        Err(_) => panic!("run_p2p did not exit after stop"),
+    }
+}
+
+async fn wait_height(rpc: SocketAddr, height: u32) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let count = jsonrpc(rpc, "getblockcount", json!([])).await;
+        if count["result"].as_u64() == Some(u64::from(height)) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("height {height} not reached: {count}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn assert_startup(logs: &StartupLogs, skip: bool) {
+    let skipped = logs
+        .iter()
+        .any(|(_, line)| line.contains("stored tip is current"));
+    let catch_up = logs
+        .iter()
+        .any(|(_, line)| line.contains("ibd: catch-up candidates"));
+    assert_eq!(
+        skipped,
+        skip,
+        "skip={skip} lines={:?}",
+        logs.iter().map(|(_, line)| line).collect::<Vec<_>>()
+    );
+    assert_eq!(catch_up, !skip, "catch-up log did not match skip={skip}");
+}
+
+/// Restart above genesis with the miner ahead: tip follow, no catch-up dial.
+/// A stale max tip age, and a heavier header forked under genesis on a
+/// 40-block chain, both stay in catch-up. Genesis itself stays in catch-up
+/// in `node_run_p2p_short`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn startup_tip_follow_on_restart() {
+    let wall = llvm_cov_wall(60, 180);
+    tokio::time::timeout(wall, startup_tip_follow_journey())
+        .await
+        .expect("startup_tip_follow_on_restart wall");
+}
+
+async fn startup_tip_follow_journey() {
+    let blocks = regtest_chain(7);
+    let miner_dir = TestDatadir::new().unwrap();
+    let miner = start_miner(miner_dir.path().as_path()).await;
+    load_chain(&miner, &blocks);
+    let syncer_dir = TestDatadir::new().unwrap();
+    let syncer = start_miner(syncer_dir.path().as_path()).await;
+    load_chain(&syncer, &blocks[..=5]);
+    syncer.hub.query.flush().unwrap();
+    syncer.shutdown().await;
+
+    let node = spawn_run_p2p_logs(startup_cfg(
+        syncer_dir.path().as_path(),
+        miner.local_addr,
+        u64::MAX,
+    ));
+    let rpc = published_listener(syncer_dir.path().as_path(), "rpc", Duration::from_secs(30)).await;
+    wait_height(rpc, 7).await;
+    let logs = stop_logged(rpc, node).await;
+    assert_startup(&logs, true);
+
+    let node = spawn_run_p2p_logs(startup_cfg(
+        syncer_dir.path().as_path(),
+        miner.local_addr,
+        0,
+    ));
+    let rpc = published_listener(syncer_dir.path().as_path(), "rpc", Duration::from_secs(30)).await;
+    wait_height(rpc, 7).await;
+    let logs = stop_logged(rpc, node).await;
+    assert_startup(&logs, false);
+
+    // 40 blocks puts the genesis sibling outside the 32-hop IBD seed window.
+    let deep = regtest_chain(40);
+    let deep_miner_dir = TestDatadir::new().unwrap();
+    let deep_miner = start_miner(deep_miner_dir.path().as_path()).await;
+    load_chain(&deep_miner, &deep);
+    let deep_dir = TestDatadir::new().unwrap();
+    let deep_node = start_miner(deep_dir.path().as_path()).await;
+    load_chain(&deep_node, &deep);
+    plant_deep_heavy_header(&deep_node.hub.query);
+    deep_node.hub.query.flush().unwrap();
+    deep_node.shutdown().await;
+
+    let node = spawn_run_p2p_logs(startup_cfg(
+        deep_dir.path().as_path(),
+        deep_miner.local_addr,
+        u64::MAX,
+    ));
+    let rpc = published_listener(deep_dir.path().as_path(), "rpc", Duration::from_secs(30)).await;
+    wait_height(rpc, 40).await;
+    let logs = stop_logged(rpc, node).await;
+    assert_startup(&logs, false);
+
+    deep_miner.shutdown().await;
+    miner.shutdown().await;
+}

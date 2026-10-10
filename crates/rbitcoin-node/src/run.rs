@@ -1581,6 +1581,66 @@ pub(crate) fn catch_up_after_err(tip: u32, index_is_tip: bool, shutdown: bool) -
     }
 }
 
+/// A stored header path with more work than the confirmed tip.
+///
+/// Hash and height come from one confirmed row. A missing row or a read
+/// error stays in catch-up. The scan climbs to genesis, not the 32-hop
+/// IBD seed window.
+fn stored_header_chain_heavier_than_tip(hub: &ChainHub) -> bool {
+    let Some(tip_h) = hub.tip_height() else {
+        return true;
+    };
+    let rec = match hub
+        .query
+        .header_at_height(rbitcoin_primitives::Height(tip_h))
+    {
+        Ok(Some((_, rec))) => rec,
+        Ok(None) => {
+            warn!("node: startup tip header missing — catch-up");
+            return true;
+        }
+        Err(e) => {
+            warn!("node: startup tip header read failed: {e} — catch-up");
+            return true;
+        }
+    };
+    match hub.query.has_heavier_header_chain_than_tip(rec.hash, tip_h) {
+        Ok(heavier) => heavier,
+        Err(e) => {
+            warn!("node: startup header scan failed: {e} — catch-up");
+            true
+        }
+    }
+}
+
+fn startup_skip_from_hub(hub: &ChainHub) -> bool {
+    // Genesis stays in catch-up, same as a catch-up that accepts nothing.
+    // The header walk runs only when age and work would already skip.
+    let Some(tip_h) = hub.tip_height() else {
+        return false;
+    };
+    if tip_h == 0 || hub.tip_is_stale_for_ibd() || !hub.meets_minimum_chain_work() {
+        return false;
+    }
+    !stored_header_chain_heavier_than_tip(hub)
+}
+
+async fn startup_follows_without_catch_up(hub: &Arc<ChainHub>) -> bool {
+    let hub = Arc::clone(hub);
+    let joined = tokio::task::spawn_blocking(move || {
+        let _region = BlockingRegion::enter();
+        startup_skip_from_hub(&hub)
+    })
+    .await;
+    match joined {
+        Ok(skip) => skip,
+        Err(e) => {
+            warn!("node: startup tip check failed: {e} — catch-up");
+            false
+        }
+    }
+}
+
 fn apply_startup_index_mode(
     query: &Query,
     config: &NodeConfig,
@@ -1646,6 +1706,10 @@ async fn run_ibd_or_skip(
     }
     if shutdown.requested() {
         return CatchUp::Incomplete;
+    }
+    if startup_follows_without_catch_up(&node.hub).await {
+        info!("node: stored tip is current — tip follow (skip catch-up)");
+        return CatchUp::complete();
     }
     let target_peers = max_out.clamp(8, 32);
     // Window, per-peer cap, and stall come from `IbdConfig::default`.
@@ -2017,7 +2081,9 @@ fn sh_tip_ready_gates(query: &Query) -> TipModeGates {
 ///
 /// **Preconditions (enforced by IBD, not repaired here):** Direct catch-up already
 /// wrote durable **`tx.head`** (archive) and **spend annotations** (confirm).
-/// Incomplete IBD must not call this (`CatchUp::Complete` only after full horizon).
+/// Incomplete IBD must not call this. `CatchUp::Complete` is a finished
+/// horizon, or a stored tip above genesis already inside min chain work and
+/// max tip age with no heavier local header chain.
 ///
 /// **SH methods (exactly two):**
 /// - Durable head: stay/flip [`IndexMode::Tip`], discard leftover runs;
