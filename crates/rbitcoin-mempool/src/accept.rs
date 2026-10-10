@@ -1101,9 +1101,11 @@ impl ActiveMempool {
 
         // Kept until success so a later error can put these bodies back.
         self.undone_replacements = replaced_txs;
+        self.store.begin_death_batch();
         for c in conflict_set.iter().rev() {
             let _ = self.remove_txid(c);
         }
+        self.store.end_death_batch()?;
 
         self.last_evicted.clear();
         let mut evicted = self.ensure_free_slot(Some(txid))?;
@@ -1377,6 +1379,7 @@ impl ActiveMempool {
         let evicted_rate = chunk.fee_rate_sat_per_kvb();
         self.note_evicted_feerate(evicted_rate);
         let mut gone = Vec::new();
+        self.store.begin_death_batch();
         for t in &chunk.txids {
             if protect == Some(*t) {
                 continue;
@@ -1385,6 +1388,7 @@ impl ActiveMempool {
                 gone.extend(self.remove_txid_tree(t));
             }
         }
+        self.store.end_death_batch()?;
         Ok(gone)
     }
 
@@ -1704,15 +1708,33 @@ impl ActiveMempool {
         )
     }
 
+    /// Group the following [`Self::remove_txid`] calls into one slots `fdatasync`.
+    pub fn begin_death_batch(&mut self) {
+        self.store.begin_death_batch();
+    }
+
+    /// Sync DEAD marks from the matching [`Self::begin_death_batch`].
+    pub fn end_death_batch(&mut self) -> Result<(), AcceptError> {
+        self.store.end_death_batch()?;
+        Ok(())
+    }
+
     /// Remove live graph entries listed in `block_txids` (no orphan promote).
     pub fn remove_live_txids(&mut self, block_txids: &[Txid]) -> Result<usize, AcceptError> {
-        let mut n = 0usize;
-        for txid in block_txids {
-            if self.graph.contains(txid) {
-                self.remove_txid(txid)?;
-                n += 1;
+        self.store.begin_death_batch();
+        let stripped = (|| -> Result<usize, AcceptError> {
+            let mut n = 0usize;
+            for txid in block_txids {
+                if self.graph.contains(txid) {
+                    self.remove_txid(txid)?;
+                    n += 1;
+                }
             }
-        }
+            Ok(n)
+        })();
+        let synced = self.store.end_death_batch();
+        let n = stripped?;
+        synced?;
         if n > 0 {
             let _ = self.maybe_compact();
             let _ = self.store.persist_if_dirty();
@@ -1751,11 +1773,13 @@ impl ActiveMempool {
         }
         let set = self.graph.conflict_set(&direct);
         let mut out = Vec::new();
+        self.store.begin_death_batch();
         for id in set {
             if self.remove_txid(&id).is_ok() {
                 out.push(id);
             }
         }
+        let _ = self.store.end_death_batch();
         if !out.is_empty() {
             let _ = self.maybe_compact();
             let _ = self.store.persist_if_dirty();
@@ -1920,6 +1944,7 @@ impl ActiveMempool {
         loop {
             let ids: Vec<Txid> = self.graph.iter().map(|(t, _)| *t).collect();
             let mut removed = false;
+            self.store.begin_death_batch();
             for id in ids {
                 let Some(tx) = self.get_tx(&id).cloned() else {
                     continue;
@@ -1943,6 +1968,7 @@ impl ActiveMempool {
                     removed = true;
                 }
             }
+            let _ = self.store.end_death_batch();
             if !removed {
                 break;
             }

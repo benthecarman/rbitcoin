@@ -1275,6 +1275,7 @@ impl MempoolHub {
         let n = {
             let mut n = 0usize;
             let mut g = self.lock_write();
+            g.begin_death_batch();
             for t in kill.iter().rev() {
                 if g.graph.get(t).is_some() {
                     if g.remove_txid(t).is_ok() {
@@ -1289,6 +1290,7 @@ impl MempoolHub {
                     n += 1;
                 }
             }
+            let _ = g.end_death_batch();
             if n > 0 {
                 self.note_template_update();
             }
@@ -1401,11 +1403,13 @@ impl MempoolHub {
         let to_drop = self.live_confirmed_strong(&live);
         let mut g = self.lock_write();
         let mut gone = Vec::new();
+        g.begin_death_batch();
         for tid in &to_drop {
             if g.graph.contains(tid) && g.remove_txid(tid).is_ok() {
                 gone.push(*tid);
             }
         }
+        let _ = g.end_death_batch();
         let remain: Vec<Txid> = g.graph.iter().map(|(t, _)| *t).collect();
         let spent_ops = self.spent_chain_prevouts(&g, &remain);
         gone.extend(g.evict_conflicts_with(&spent_ops));

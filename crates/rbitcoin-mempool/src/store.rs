@@ -9,7 +9,8 @@
 //!
 //! Schema **3** packed live records (schema 2 + per-record sigop cost). Body is append-only (`body_persisted_len`);
 //! `persist_due` syncs the dirty tail, then syncs new LIVE slots, then writes meta.
-//! Compact copies packed payload ranges. DEAD of a durable slot is one-record `pwrite`.
+//! Compact copies packed payload ranges. DEAD of a durable slot is a one-byte
+//! `pwrite`. A batch syncs `slots` once, then `meta`.
 //! Open keeps LIVE rows inside the logical body and returns [`MempoolError::Corrupt`]
 //! for an in-range payload that does not decode. The hub moves that image aside.
 //!
@@ -110,6 +111,13 @@ pub struct Mempool {
     last_slot_write_bytes: u64,
     /// Tests pin the table at the live count so the next admit evicts.
     grow_pinned: bool,
+    /// Nested `begin_death_batch` depth. Zero means each durable DEAD syncs itself.
+    death_batch: u32,
+    /// A durable DEAD `pwrite` is not yet covered by `sync_data` of `slots`.
+    deaths_unsynced: bool,
+    /// Successful `meta` `sync_data` calls (tests).
+    #[cfg(test)]
+    meta_syncs: u64,
 }
 
 impl Mempool {
@@ -147,6 +155,10 @@ impl Mempool {
             last_body_write_off: 0,
             last_slot_write_bytes: 0,
             grow_pinned: false,
+            death_batch: 0,
+            deaths_unsynced: false,
+            #[cfg(test)]
+            meta_syncs: 0,
         };
         let body_schema = u16::from_le_bytes(mp.body[4..6].try_into().unwrap());
         if body_schema != MEM_SCHEMA {
@@ -207,9 +219,12 @@ impl Mempool {
     ///
     /// Body tail is `sync_data`'d, then new LIVE slot records are written and
     /// synced, then meta. One `fdatasync` of the dirty body per dirty interval.
-    /// DEAD of durable slots is [`Self::mark_slot_dead`]. Flush / grow /
-    /// compact still rewrite the full slot table.
+    /// DEAD of durable slots is [`Self::mark_slot_dead`] (one slots sync per
+    /// batch, not per tx). Flush / grow / compact still rewrite the full slot table.
     pub fn persist_due(&mut self) -> Result<(), MempoolError> {
+        if self.deaths_unsynced {
+            self.sync_deaths()?;
+        }
         if !self.body_dirty {
             return Ok(());
         }
@@ -354,10 +369,12 @@ impl Mempool {
 
     /// Mark slot DEAD and decrement live_count (confirm / RBF / eviction).
     ///
-    /// If the slot is already on disk, `pwrite` that one record to DEAD (and
-    /// meta live_count). An admit that was never durable stays RAM-only — crash
-    /// loses it; this path must not dump the full slot table (LIVE rows whose
-    /// body is still in the unpersisted tail).
+    /// If the slot is already on disk, `pwrite` that one status byte. Outside a
+    /// [`Self::begin_death_batch`], sync `slots` then `meta` immediately. Inside
+    /// a batch the sync waits for [`Self::end_death_batch`]: one `fdatasync`
+    /// covers every DEAD byte. An admit that was never durable stays RAM-only.
+    /// This path must not dump the full slot table (LIVE rows whose body is
+    /// still in the unpersisted tail).
     pub fn mark_slot_dead(&mut self, slot: u32) -> Result<(), MempoolError> {
         if slot >= self.slot_cap {
             return Err(MempoolError::Corrupt("slot OOB"));
@@ -373,7 +390,10 @@ impl Mempool {
         self.live_count = self.live_count.saturating_sub(1);
         if body_off.saturating_add(body_len) <= self.body_persisted_len {
             self.pwrite_slot_status(slot, SLOT_DEAD)?;
-            self.persist_meta()?;
+            self.deaths_unsynced = true;
+            if self.death_batch == 0 {
+                self.sync_deaths()?;
+            }
         }
         Ok(())
     }
@@ -828,6 +848,50 @@ impl Mempool {
         self.meta_file
             .sync_data()
             .map_err(|e| MempoolError::io(&meta_path, e))?;
+        #[cfg(test)]
+        {
+            self.meta_syncs = self.meta_syncs.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// How many times `meta` has been `sync_data`'d since open.
+    #[cfg(test)]
+    pub(crate) fn meta_syncs(&self) -> u64 {
+        self.meta_syncs
+    }
+
+    /// Group durable DEAD marks so they share one slots `sync_data` and one meta sync.
+    ///
+    /// Nested batches sync when the outermost [`Self::end_death_batch`] returns.
+    pub(crate) fn begin_death_batch(&mut self) {
+        self.death_batch = self.death_batch.saturating_add(1);
+    }
+
+    /// Finish [`Self::begin_death_batch`]. The outermost end fsyncs `slots`, then `meta`.
+    pub(crate) fn end_death_batch(&mut self) -> Result<(), MempoolError> {
+        self.death_batch = self.death_batch.saturating_sub(1);
+        if self.death_batch == 0 {
+            self.sync_deaths()?;
+        }
+        Ok(())
+    }
+
+    /// `fdatasync` DEAD `pwrite`s, then publish `live_count`.
+    ///
+    /// Slot status is what open reloads. `meta` is written after that sync so a
+    /// crash between them reloads the DEAD rows and reconciles the count.
+    /// Does not rewrite the slot table (unpersisted LIVE rows stay off disk).
+    fn sync_deaths(&mut self) -> Result<(), MempoolError> {
+        if !self.deaths_unsynced {
+            return Ok(());
+        }
+        let path = self.dir.join("slots");
+        self.slots_file
+            .sync_data()
+            .map_err(|e| MempoolError::io(&path, e))?;
+        self.persist_meta()?;
+        self.deaths_unsynced = false;
         Ok(())
     }
 
@@ -1290,6 +1354,51 @@ pub(crate) mod tests {
             let mp = Mempool::open_or_create(&dir).unwrap();
             assert_eq!(mp.live_count(), 1, "persist_due after 5s is durable");
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn death_batch_fsyncs_meta_once() {
+        let dir = tmp_dir();
+        let n = 8u32;
+        let mut slots = Vec::with_capacity(n as usize);
+        let mut mp = Mempool::open_or_create(&dir).unwrap();
+        for i in 0..n {
+            let mut id = [0u8; 32];
+            id[0] = i as u8;
+            id[1] = 0xD0;
+            slots.push(put_live(&mut mp, &Txid::from_byte_array(id), 1, 400));
+        }
+        mp.flush().unwrap();
+        let body_before = fs::read(dir.join("tx.body")).unwrap();
+        let syncs = mp.meta_syncs();
+        mp.begin_death_batch();
+        for slot in &slots {
+            mp.mark_slot_dead(*slot).unwrap();
+        }
+        assert_eq!(
+            mp.meta_syncs(),
+            syncs,
+            "a death batch must not fdatasync meta per removed tx"
+        );
+        mp.end_death_batch().unwrap();
+        assert_eq!(
+            mp.meta_syncs(),
+            syncs + 1,
+            "the batch ends with one meta fsync"
+        );
+        assert_eq!(
+            fs::read(dir.join("tx.body")).unwrap(),
+            body_before,
+            "a death batch must not rewrite tx.body"
+        );
+        drop(mp);
+        let mp = Mempool::open_or_create(&dir).unwrap();
+        assert!(
+            mp.load_live_txs().unwrap().is_empty(),
+            "batched DEAD marks must not resurrect"
+        );
+        assert_eq!(mp.live_count(), 0);
         let _ = fs::remove_dir_all(&dir);
     }
 
