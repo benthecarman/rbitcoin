@@ -3399,7 +3399,11 @@ mod tests {
         assert_eq!(n, 2);
         let (meta_after, slots_after) = mp.death_sync_counts();
         assert_eq!(meta_after, meta_before + 1, "block strip syncs meta once");
-        assert_eq!(slots_after, slots_before + 1, "block strip syncs slots once");
+        assert_eq!(
+            slots_after,
+            slots_before + 1,
+            "block strip syncs slots once"
+        );
         assert_eq!(mp.live_count(), 4);
         drop(mp);
         let mp = ActiveMempool::open_or_create(&dir).unwrap();
