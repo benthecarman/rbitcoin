@@ -2166,6 +2166,10 @@ impl Query {
         self.store.archived_block_count()
     }
 
+    /// IBD seeding climbs this many ancestors looking for a heavier sibling.
+    /// Startup's heavier-chain check climbs to genesis instead.
+    const RESUME_ANCESTOR_HOPS: u32 = 32;
+
     /// Rebuild the post-tip work path from durable headers + Class A bodies.
     ///
     /// IBD only remembered the ordered path in RAM. On restart it re-ran
@@ -2188,12 +2192,45 @@ impl Query {
 
     /// Like [`Self::resume_work_path_after_tip`] but omit `exclude` hashes from
     /// the child graph (invalid subtrees do not win most-work ranking).
+    ///
+    /// The sibling search climbs at most 32 ancestors.
     pub fn resume_work_path_after_tip_excluding(
         &self,
         tip_hash: [u8; 32],
         tip_height: u32,
         max: usize,
         exclude: &[[u8; 32]],
+    ) -> Result<Vec<ResumeWorkEntry>, QueryError> {
+        self.resume_work_path_limited(
+            tip_hash,
+            tip_height,
+            max,
+            exclude,
+            Self::RESUME_ANCESTOR_HOPS,
+        )
+    }
+
+    /// True when any stored header path has more work than the confirmed tip.
+    ///
+    /// The sibling search climbs to genesis. IBD seeding keeps the 32-hop cap;
+    /// startup uses this so a deep stored fork still stays in catch-up.
+    /// A tip hash with no header row is an empty path (`Ok(false)`).
+    pub fn has_heavier_header_chain_than_tip(
+        &self,
+        tip_hash: [u8; 32],
+        tip_height: u32,
+    ) -> Result<bool, QueryError> {
+        let path = self.resume_work_path_limited(tip_hash, tip_height, 1, &[], u32::MAX)?;
+        Ok(!path.is_empty())
+    }
+
+    fn resume_work_path_limited(
+        &self,
+        tip_hash: [u8; 32],
+        tip_height: u32,
+        max: usize,
+        exclude: &[[u8; 32]],
+        ancestor_hops: u32,
     ) -> Result<Vec<ResumeWorkEntry>, QueryError> {
         if max == 0 {
             return Ok(Vec::new());
@@ -2208,8 +2245,13 @@ impl Query {
 
         let index = Self::resume_index_children(&self.store, n, exclude)?;
         let mut score_memo: U64Map<(bitcoin::Work, u32)> = U64Map::default();
-        let best_sib =
-            self.resume_nearest_better_sib(tip_fk, tip_height, &index, &mut score_memo)?;
+        let best_sib = self.resume_nearest_better_sib(
+            tip_fk,
+            tip_height,
+            &index,
+            &mut score_memo,
+            ancestor_hops,
+        )?;
         self.resume_walk_best_kids(tip_fk, tip_height, max, best_sib, &index, &mut score_memo)
     }
 
@@ -2256,12 +2298,12 @@ impl Query {
         tip_height: u32,
         index: &ResumeHeaderIndex,
         score_memo: &mut U64Map<(bitcoin::Work, u32)>,
+        ancestor_hops: u32,
     ) -> Result<Option<ResumeSibPick>, QueryError> {
-        const ANCESTOR_HOPS: u32 = 32;
         let mut best_sib: Option<ResumeSibPick> = None;
         let mut path_fk = tip_fk;
         let mut path_h = tip_height;
-        for _ in 0..ANCESTOR_HOPS {
+        for _ in 0..ancestor_hops {
             let Some(parent_fk) = Self::resume_parent(index, path_fk) else {
                 break;
             };

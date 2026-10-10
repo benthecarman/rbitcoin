@@ -3065,7 +3065,7 @@ async fn node_run_p2p_short() {
             assert_eq!(rows[0]["transport_protocol_type"], "v2", "{peers}");
             assert!(
                 rows[0]["bytesrecv"].as_u64().unwrap_or(0) > 0,
-                "tip follow must receive the seeder's blocks: {peers}"
+                "IBD must receive bytes: {peers}"
             );
             let addr = rows[0]["addr"].as_str().expect("addr").to_string();
             assert_eq!(addr, seed_addr.to_string(), "{peers}");
@@ -3082,18 +3082,15 @@ async fn node_run_p2p_short() {
                 Some(3),
                 "VERSION start_height is the seeder tip: {peers}"
             );
-            // Genesis is inside this node's max tip age and the header store
-            // has nothing heavier, so startup tip-follows. The headers that
-            // advanced the tip are this peer's best known.
             assert_eq!(
                 rows[0]["synced_headers"].as_i64(),
-                Some(3),
-                "tip follow records the headers that reached the seeder tip: {peers}"
+                Some(-1),
+                "empty getheaders at tip does not set best_known: {peers}"
             );
             assert_eq!(
                 rows[0]["synced_blocks"].as_i64(),
-                Some(3),
-                "synced_blocks follows that best known height: {peers}"
+                Some(-1),
+                "synced_blocks follows best_known, not startingheight: {peers}"
             );
             assert!(
                 rows[0]["servicesnames"]
