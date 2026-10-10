@@ -82,9 +82,7 @@ fn tx_to_apply(tx: &Transaction, txid: [u8; 32]) -> Result<TxApply, ConsensusErr
         .input
         .iter()
         .map(|inp| {
-            let is_cb = inp.previous_output.is_null()
-                || (inp.previous_output.txid.to_byte_array() == [0u8; 32]
-                    && inp.previous_output.vout == u32::MAX);
+            let is_cb = inp.previous_output.is_null();
             InputRecord {
                 prev_txid: inp.previous_output.txid.to_byte_array(),
                 // Archive resolve fills create_fk before pack; coinbase stays NULL.

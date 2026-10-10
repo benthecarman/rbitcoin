@@ -443,6 +443,27 @@ fn verify_one_script_job_skips_anyone_can_spend() {
         crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
     );
     assert!(verify_one_script_job(&job).is_ok());
+
+    let mut witnessed = job;
+    witnessed.tx = crate::block::JobTx::owned(Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([9; 32]),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::from_slice(&[vec![0x01]]),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    });
+    let err = verify_one_script_job(&witnessed).expect_err("bare OP_TRUE rejects a witness");
+    assert!(format!("{err}").contains("WITNESS_UNEXPECTED"), "{err:?}");
 }
 
 #[test]

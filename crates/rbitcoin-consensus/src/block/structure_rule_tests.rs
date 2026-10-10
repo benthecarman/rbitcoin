@@ -963,6 +963,19 @@ fn script_sigop_count_and_last_push_helpers() {
 }
 
 #[test]
+fn last_script_push_rejects_a_non_push_and_a_short_pushdata() {
+    // OP_16 (0x60) is an empty push. The next opcode is not a push.
+    assert_eq!(last_script_push(&[0x60]), Some(&[][..]));
+    assert!(last_script_push(&[0x61]).is_none());
+    // PUSHDATA2 needs two length bytes. One byte, or a length past the script, is no redeem.
+    assert!(last_script_push(&[0x4d]).is_none());
+    assert!(last_script_push(&[0x4d, 0x01]).is_none());
+    assert!(last_script_push(&[0x4d, 0x02, 0x00, 0x11]).is_none());
+    // PUSHDATA4 needs four length bytes. Three is no redeem.
+    assert!(last_script_push(&[0x4e, 0x00, 0x00, 0x00]).is_none());
+}
+
+#[test]
 fn p3_default_milestone_heights() {
     use crate::params::default_milestone_height;
     use rbitcoin_primitives::Network;
@@ -2812,6 +2825,119 @@ fn max_money_fits_in_i64_so_the_assemble_cast_is_in_range() {
     assert_eq!(money_range_out_sum(max_money), max_money as i64);
     assert!(i64::try_from(max_money).is_ok());
     assert!(i64::try_from(u64::MAX).is_err());
+}
+
+#[test]
+fn assemble_without_pres_sums_zero_and_rejects_over_max() {
+    fn one(sats: u64) -> Transaction {
+        Transaction {
+            version: TxVersion::ONE,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(sats),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        }
+    }
+    assert_eq!(super::assemble_tx_value_out(&one(0), 0, None).unwrap(), 0);
+    let max_money = Amount::MAX_MONEY.to_sat();
+    assert_eq!(
+        super::assemble_tx_value_out(&one(max_money), 0, None).unwrap(),
+        max_money as i64
+    );
+    assert!(matches!(
+        super::assemble_tx_value_out(&one(max_money + 1), 0, None),
+        Err(ConsensusError::BadBlock("bad-txns-vout-toolarge"))
+    ));
+}
+
+#[test]
+fn witness_commitment_leaves_a_legacy_block_unchanged() {
+    let mut b = block_with(vec![coinbase(1)]);
+    let outs = b.txdata[0].output.len();
+    apply_witness_commitment(&mut b);
+    assert_eq!(b.txdata[0].output.len(), outs);
+    assert!(b.txdata[0].input[0].witness.is_empty());
+}
+
+#[test]
+fn resolve_prevout_rejects_a_same_index_parent() {
+    use super::{resolve_prevout, AsmPrevoutAcc, TxidMap};
+    let parent = coinbase(1);
+    let txid = parent.compute_txid().to_byte_array();
+    let spend = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: parent.compute_txid(),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let block = block_with(vec![parent, spend.clone()]);
+    let mut index = TxidMap::default();
+    index.insert(txid, 1usize);
+    match resolve_prevout(
+        &block,
+        spend.input[0].previous_output,
+        &spend.input[0],
+        None,
+        &index,
+        1,
+        &rbitcoin_query::BatchParents::new(),
+        true,
+        true,
+        false,
+        None,
+        &mut AsmPrevoutAcc::default(),
+    ) {
+        Err(err) => assert!(format!("{err}").contains("lookup stage miss"), "{err}"),
+        Ok(_) => panic!("a tx cannot spend an output at its own index"),
+    }
+}
+
+#[test]
+fn same_height_confirmed_spender_is_not_below_its_create() {
+    use super::structural_apply_one_meta;
+    use rbitcoin_primitives::Fk;
+    let (_dir, query) = rbitcoin_query::testutil::tiny_query_labeled("spend-same-h");
+    let store = query.store();
+    store
+        .confirmed
+        .set(rbitcoin_primitives::Height(0), Fk(1))
+        .unwrap();
+    store.header_txs.put_range(Fk(1), Fk(1), 1).unwrap();
+    store.strong_tx.set_strong(Fk(1), Fk(1)).unwrap();
+    store.rebuild_height_fence().unwrap();
+    let mut scratch = super::StructuralScratch::default();
+    scratch.height_by_id.insert(9, 0);
+    scratch.field_h_by_id.insert(1, 0);
+    structural_apply_one_meta(
+        &query,
+        Some((Fk(1), 0, 0)),
+        9,
+        0,
+        0,
+        Fk::NULL,
+        0,
+        Some(0),
+        &mut scratch,
+    )
+    .expect("spender and create at the same height are not corrupt");
 }
 
 #[test]

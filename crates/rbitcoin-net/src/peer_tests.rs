@@ -857,8 +857,32 @@ fn handle_peer_frame_control_and_inv_paths() {
             NetworkMessage::BlockTxn(_)
         ));
 
-        // Deeper than 10: full block, not blocktxn (`p2p_compactblocks` :635).
-        hub.generate_to_script(12, ScriptBuf::from_bytes(vec![0x51]), vec![])
+        // Depth 10 still answers with the transactions. One past that is a full block
+        // (`p2p_compactblocks` :635).
+        hub.generate_to_script(10, ScriptBuf::from_bytes(vec![0x51]), vec![])
+            .unwrap();
+        handle_peer_frame(
+            frame_for(NetworkMessage::GetBlockTxn(GetBlockTxn {
+                txs_request: BlockTransactionsRequest {
+                    block_hash: tip,
+                    indexes: vec![0],
+                },
+            })),
+            &hub,
+            &out_tx,
+            &mut follow,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                out_rx.try_recv().unwrap().expect_msg(),
+                NetworkMessage::BlockTxn(_)
+            ),
+            "getblocktxn at depth 10 still serves the transactions"
+        );
+        hub.generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![])
             .unwrap();
         handle_peer_frame(
             frame_for(NetworkMessage::GetBlockTxn(GetBlockTxn {
@@ -3664,6 +3688,39 @@ async fn over_budget_reader_waits_until_one_byte_is_written() {
         .unwrap();
 }
 
+/// `fPauseSend`: an over-budget session does not read. A ping sent while only
+/// the send budget is blown gets no pong until the writer drains.
+#[tokio::test]
+async fn over_budget_session_does_not_read_a_ping() {
+    use std::time::Duration;
+    let mut t = paused_serve("serve-pause-read", 1, &["/rbitcoin:test(budget-read)/"]).await;
+    let (raw, sess) = &mut t.clients[0];
+    sess.note_send_queued(2 * crate::peers::PEER_SEND_BUDGET);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    write_peer_msg(raw, NetworkMessage::Ping(7)).await;
+    let early = tokio::time::timeout(Duration::from_millis(200), async {
+        loop {
+            if let NetworkMessage::Pong(7) = next_peer_msg(raw).await.unwrap() {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(early.is_err(), "over-budget session must not read the ping");
+    sess.note_send_written(2 * crate::peers::PEER_SEND_BUDGET);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let NetworkMessage::Pong(7) = next_peer_msg(raw).await.unwrap() {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("draining the send budget lets the session read the ping");
+    t.node.shutdown().await;
+    let _ = std::fs::remove_dir_all(&t.dir);
+}
+
 fn inbound_peer(
     peers: &std::sync::Arc<crate::peers::PeerHub>,
 ) -> std::sync::Arc<crate::peers::LivePeer> {
@@ -3975,6 +4032,58 @@ async fn notfound_makes_the_waiting_wtxid_peer_due() {
     );
     assert!(due[0].wtxid);
     assert_eq!(due[0].hash, wtxid.to_byte_array());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// `notfound` for a txid inventory (with or without witness) clears that request.
+#[tokio::test]
+async fn notfound_for_txid_inventory_wakes_the_waiter() {
+    use bitcoin::hashes::Hash;
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("txid-notfound");
+    hub.ensure_genesis().unwrap();
+    let t = hub.tip_header().unwrap().time;
+    hub.clock.set_mock(i64::from(t) + 1);
+    let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), std::sync::Arc::clone(&hub.query))
+        .unwrap();
+    mp.set_relay_enabled(true);
+    assert!(hub.attach_mempool(mp).is_ok());
+    let peers = crate::peers::PeerHub::new();
+    for (n, witness) in [(0xab_u8, false), (0xcd, true)] {
+        let peer1 = inbound_peer(&peers);
+        let peer2 = inbound_peer(&peers);
+        let txid = bitcoin::Txid::from_byte_array([n; 32]);
+        let item = if witness {
+            Inventory::WitnessTransaction(txid)
+        } else {
+            Inventory::Transaction(txid)
+        };
+        let noted = peer1.clock_now();
+        let (tx1, mut rx1) = mpsc::unbounded_channel();
+        let (tx2, _rx2) = mpsc::unbounded_channel();
+        let mut follow = PeerFollowState::new();
+        on_inv(&hub, &tx1, &mut follow, Some(&peer1), &[item]).unwrap();
+        on_inv(&hub, &tx2, &mut follow, Some(&peer2), &[item]).unwrap();
+        assert!(matches!(
+            rx1.try_recv().unwrap().expect_msg(),
+            NetworkMessage::GetData(_)
+        ));
+        handle_peer_inventory_msg(
+            &NetworkMessage::NotFound(vec![item]),
+            &hub,
+            &tx1,
+            &mut follow,
+            Some(&peer1),
+        )
+        .unwrap();
+        let due = hub
+            .mempool()
+            .unwrap()
+            .take_due_parent_getdata(peer2.id, noted);
+        assert_eq!(due.len(), 1, "txid notfound makes the waiter due");
+        assert!(!due[0].wtxid);
+        assert_eq!(due[0].hash, txid.to_byte_array());
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
 

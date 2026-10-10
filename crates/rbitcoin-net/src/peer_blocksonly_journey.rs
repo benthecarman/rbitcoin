@@ -316,6 +316,79 @@ fn force_announce_picks_peers(
     assert!(pricey_rx.try_recv().is_err(), "minfeefilter skips INV");
     assert_eq!(tx_invs(&mut ok_rx), vec![relayed.compute_wtxid()]);
 
+    let (fee, weight) = mp
+        .try_get_live_meta(&relayed.compute_txid())
+        .expect("live meta");
+    let rate = rbitcoin_consensus::policy::fee_rate_sat_per_kvb(fee, weight);
+    assert!(rate > 0, "the spend must have a non-zero fee rate");
+    let announce = |txid| crate::tx_relay::MempoolAnnounce {
+        txid,
+        replaced: vec![],
+        replaced_scripthashes: vec![],
+        scripthashes: vec![],
+    };
+    let follow = PeerFollowState::new();
+    let stand_equal = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
+    let _stand_equal_rx = writer_of(&stand_equal);
+    stand_equal.note_minfeefilter_sat_kvb(rate);
+    let stand_above = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
+    let _stand_above_rx = writer_of(&stand_above);
+    stand_above.note_minfeefilter_sat_kvb(rate.saturating_add(1));
+    let (eq_tx, mut eq_ann) = mpsc::unbounded_channel();
+    let (hi_tx, mut hi_ann) = mpsc::unbounded_channel();
+    on_tx_announce_ok(
+        hub,
+        &eq_tx,
+        &follow,
+        Some(&stand_equal),
+        announce(relayed.compute_txid()),
+    )
+    .unwrap();
+    on_tx_announce_ok(
+        hub,
+        &hi_tx,
+        &follow,
+        Some(&stand_above),
+        announce(relayed.compute_txid()),
+    )
+    .unwrap();
+    assert_eq!(tx_invs(&mut eq_ann), vec![relayed.compute_wtxid()]);
+    assert!(
+        hi_ann.try_recv().is_err(),
+        "a filter above the fee is not announced"
+    );
+
+    let due_equal = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
+    let _due_equal_rx = writer_of(&due_equal);
+    due_equal.note_minfeefilter_sat_kvb(rate);
+    due_equal.request_tx_inv();
+    let due_above = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
+    let _due_above_rx = writer_of(&due_above);
+    due_above.note_minfeefilter_sat_kvb(rate.saturating_add(1));
+    due_above.request_tx_inv();
+    let (due_eq_tx, mut due_eq_rx) = mpsc::unbounded_channel();
+    let (due_hi_tx, mut due_hi_rx) = mpsc::unbounded_channel();
+    queue_due_tx_invs(hub, due_equal.as_ref(), &CappedSet::new(), &due_eq_tx);
+    queue_due_tx_invs(hub, due_above.as_ref(), &CappedSet::new(), &due_hi_tx);
+    assert_eq!(tx_invs(&mut due_eq_rx), vec![relayed.compute_wtxid()]);
+    assert!(
+        due_hi_rx.try_recv().is_err(),
+        "periodic inv skips a filter above the fee"
+    );
+
+    let force_equal = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
+    let mut force_equal_rx = writer_of(&force_equal);
+    force_equal.note_minfeefilter_sat_kvb(rate);
+    let force_above = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
+    let mut force_above_rx = writer_of(&force_above);
+    force_above.note_minfeefilter_sat_kvb(rate.saturating_add(1));
+    crate::force_announce_txid(hub, peers, relayed.compute_txid());
+    assert_eq!(tx_invs(&mut force_equal_rx), vec![relayed.compute_wtxid()]);
+    assert!(
+        force_above_rx.try_recv().is_err(),
+        "force relay skips a filter above the fee"
+    );
+
     mp.set_isolated_broadcast(true);
     mp.accept_tx(&local).expect("local");
     mp.mark_local_origin(local.compute_txid());
@@ -336,7 +409,19 @@ fn force_announce_picks_peers(
         !mp.is_local_origin(&local.compute_txid()),
         "confirm must drop the isolated skip"
     );
-    for s in [block_relay, no_writer, seen, pricey, ok] {
+    for s in [
+        block_relay,
+        no_writer,
+        seen,
+        pricey,
+        ok,
+        stand_equal,
+        stand_above,
+        due_equal,
+        due_above,
+        force_equal,
+        force_above,
+    ] {
         peers.unregister(s.id);
     }
 }

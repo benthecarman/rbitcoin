@@ -183,6 +183,45 @@ fn three_stage_write_filter_and_scripts_surface() {
     assert!(batch.is_empty());
     assert_eq!(batch.approx_wire_bytes(), 0);
     assert_eq!(batch.parent_count(), 0);
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let mut metered = LoadedBatch {
+        prepared: Vec::new(),
+        wire_blocks: vec![std::sync::Arc::new(genesis)],
+        batch_parents: rbitcoin_query::BatchParents::new(),
+        script_preverified: ScriptPreverified::new(),
+        archive_plan: None,
+        index_want: super::index::IndexWant::default(),
+        stats: std::sync::Arc::new(rbitcoin_query::ConfirmStats::default()),
+    };
+    assert!(metered.approx_wire_bytes() > 0);
+    let mut txid = [0u8; 32];
+    txid[0] = 1;
+    metered.batch_parents.insert_owned(
+        rbitcoin_primitives::Fk(1),
+        rbitcoin_store::TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_start_fk: rbitcoin_primitives::Fk::NULL,
+            input_count: 0,
+            output_start_fk: rbitcoin_primitives::Fk::NULL,
+            output_count: 1,
+        },
+        vec![(0, rbitcoin_store::OutputRecord::unspent(1, vec![0x51]))],
+        vec![0],
+        Some(false),
+        None,
+        vec![],
+    );
+    assert_eq!(metered.parent_count(), 1);
+    let script_ok = super::ScriptOkBatch {
+        prepared: Vec::new(),
+        wire_blocks: Vec::new(),
+        batch_parents: metered.batch_parents,
+        archive_plan: None,
+        index_seal: super::index::IndexSeal::default(),
+    };
+    assert_eq!(script_ok.parent_count(), 1);
     let cur = std::thread::current();
     let name = cur.name().unwrap_or("").to_string();
     assert!(
@@ -3189,6 +3228,14 @@ fn one_shot_load_matches_stamp_then_load_from_plan() {
         from_plan.batch.parent_count()
     );
     assert_eq!(one_shot.batch.len(), 2);
+    assert!(one_shot.batch.approx_wire_bytes() > 0);
+    assert!(
+        qa.confirm_stats()
+            .phase_prep_wire_arc_ns
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0,
+        "cloning the wire batch records prep time"
+    );
     for (a, b) in one_shot
         .batch
         .prepared

@@ -459,9 +459,17 @@ mod median_time_past_tests {
         // Height above tip with no plan → incomplete load error (not BadPrev).
         let err = median_time_past(&q, Height(5)).unwrap_err();
         assert!(
-            matches!(err, ConsensusError::Store(_)) || matches!(err, ConsensusError::BadPrev),
-            "got {err:?}"
+            format!("{err}").contains("load incomplete"),
+            "above tip must be the retryable load error, got {err:?}"
         );
+
+        let (empty_dir, empty) = temp_q();
+        let err = median_time_past(&empty, Height(0)).unwrap_err();
+        assert!(
+            matches!(err, ConsensusError::BadPrev),
+            "a missing header at the tip is BadPrev, got {err:?}"
+        );
+        let _ = std::fs::remove_dir_all(&empty_dir);
 
         // expected_next_bits: height 0 + regtest no-retarget.
         let params = ChainParams::regtest();

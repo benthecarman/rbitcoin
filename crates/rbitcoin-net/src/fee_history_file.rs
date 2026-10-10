@@ -269,6 +269,16 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_without_a_journal_is_a_clean_load() {
+        let d = dir();
+        write_snapshot(&d, &[(1, block(Some(500)))], &[]).unwrap();
+        let loaded = load(&d).unwrap().unwrap();
+        assert!(loaded.journal.is_empty());
+        assert_eq!(loaded.journal_note, None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn a_torn_journal_keeps_the_records_before_the_tear() {
         let d = dir();
         let generation = write_snapshot(&d, &[(1, block(Some(500)))], &[]).unwrap();
