@@ -86,3 +86,19 @@ unexpected_cfgs = { level = "deny", check-cfg = ['cfg(coverage)'] }
 # Nursery opt-in: Core-faithful loops fail CI unless site-allowed.
 [workspace.lints.clippy]
 cognitive_complexity = "warn"
+
+# Workspace crates keep line tables (panic file and line). `*` matches
+# dependencies only and compiles them with no debug info. `test` inherits
+# `dev`; both profiles set the same values. Release debug info stays off
+# in nix/rbitcoin.nix and release.yml.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.test.package."*"]
+debug = false
