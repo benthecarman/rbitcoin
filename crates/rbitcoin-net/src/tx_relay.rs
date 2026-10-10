@@ -1275,16 +1275,21 @@ impl MempoolHub {
         let n = {
             let mut n = 0usize;
             let mut g = self.lock_write();
+            let mut present = Vec::new();
             for t in kill.iter().rev() {
                 if g.graph.get(t).is_some() {
-                    if g.remove_txid(t).is_ok() {
-                        self.unindex_txid(t);
-                        n += 1;
-                    }
+                    present.push(*t);
                 } else {
                     // Already gone from the graph (fee or slot eviction that
                     // did not unindex). Drop the relay maps so the scan can
                     // move past it.
+                    self.unindex_txid(t);
+                    n += 1;
+                }
+            }
+            let _ = g.remove_live_txids(&present);
+            for t in &present {
+                if !g.graph.contains(t) {
                     self.unindex_txid(t);
                     n += 1;
                 }
@@ -1400,15 +1405,31 @@ impl MempoolHub {
         }
         let to_drop = self.live_confirmed_strong(&live);
         let mut g = self.lock_write();
-        let mut gone = Vec::new();
-        for tid in &to_drop {
-            if g.graph.contains(tid) && g.remove_txid(tid).is_ok() {
-                gone.push(*tid);
-            }
-        }
-        let remain: Vec<Txid> = g.graph.iter().map(|(t, _)| *t).collect();
+        let drop_set: HashSet<Txid> = to_drop
+            .iter()
+            .copied()
+            .filter(|tid| g.graph.contains(tid))
+            .collect();
+        let remain: Vec<Txid> = g
+            .graph
+            .iter()
+            .map(|(t, _)| *t)
+            .filter(|t| !drop_set.contains(t))
+            .collect();
         let spent_ops = self.spent_chain_prevouts(&g, &remain);
-        gone.extend(g.evict_conflicts_with(&spent_ops));
+        let confirmed: Vec<Txid> = drop_set.into_iter().collect();
+        let (n, conflicts) = g
+            .remove_block_txids(&confirmed, &spent_ops)
+            .unwrap_or((0, Vec::new()));
+        let mut gone = if n == confirmed.len() {
+            confirmed
+        } else {
+            confirmed
+                .into_iter()
+                .filter(|t| !g.graph.contains(t))
+                .collect()
+        };
+        gone.extend(conflicts);
         if gone.is_empty() {
             return 0;
         }
@@ -2786,16 +2807,40 @@ impl MempoolHub {
     /// (block inputs that conflicted with the live set).
     pub fn remove_for_block_spent(&self, txids: &[Txid], spent: &[OutPoint]) -> usize {
         if !self.relay_enabled() {
+            self.drop_mined_fee_deltas(txids);
             return 0;
         }
-        let n = self.remove_for_block(txids);
         if spent.is_empty() {
-            return n;
+            return self.remove_for_block(txids);
         }
-        let mut g = self.lock_write();
-        let gone = g.evict_conflicts_with(spent);
-        drop(g);
+        let utxo = self.utxo_provider();
+        let (n, gone) = {
+            let mut g = self.lock_write();
+            let bps = g.graph.bytes_per_sigop();
+            for tid in txids {
+                if let Some(e) = g.graph.get(tid) {
+                    let rate = rbitcoin_consensus::policy::fee_rate_sat_per_kvb(
+                        e.fee_sat,
+                        e.adjusted_weight(bps),
+                    );
+                    self.push_confirm_memory(rate);
+                }
+            }
+            g.remove_block_txids(txids, spent)
+                .unwrap_or((0, Vec::new()))
+        };
+        for tid in txids {
+            self.promote_orphans_staged(*tid, &utxo);
+        }
+        {
+            let mut g = self.lock_write();
+            g.erase_orphans_for_block(txids);
+        }
+        if n > 0 {
+            self.unindex_evicted(txids);
+        }
         self.unindex_evicted(&gone);
+        self.drop_mined_fee_deltas(txids);
         n + gone.len()
     }
 

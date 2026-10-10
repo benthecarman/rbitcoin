@@ -619,6 +619,12 @@ impl ActiveMempool {
         self.graph.len()
     }
 
+    /// `(meta syncs, slots syncs from sync_deaths)` since open.
+    #[cfg(test)]
+    pub(crate) fn death_sync_counts(&self) -> (u64, u64) {
+        (self.store.meta_syncs(), self.store.slots_syncs())
+    }
+
     pub fn mempool_min_fee_sat_kvb(&self) -> u64 {
         let near_full = self
             .graph
@@ -1102,8 +1108,10 @@ impl ActiveMempool {
         // Kept until success so a later error can put these bodies back.
         self.undone_replacements = replaced_txs;
         for c in conflict_set.iter().rev() {
-            let _ = self.remove_txid(c);
+            let _ = self.unlink_txid(c);
         }
+        // A failed sync leaves `deaths_unsynced` set for `persist_due`.
+        let _ = self.store.sync_deaths();
 
         self.last_evicted.clear();
         let mut evicted = self.ensure_free_slot(Some(txid))?;
@@ -1382,9 +1390,10 @@ impl ActiveMempool {
                 continue;
             }
             if self.graph.contains(t) {
-                gone.extend(self.remove_txid_tree(t));
+                gone.extend(self.unlink_tree(t));
             }
         }
+        let _ = self.store.sync_deaths();
         Ok(gone)
     }
 
@@ -1561,8 +1570,9 @@ impl ActiveMempool {
             .flat_map(|r| r.replaced_txs.iter().cloned())
             .collect();
         for r in accepted.iter().rev() {
-            let _ = self.remove_txid_tree(&r.txid);
+            let _ = self.unlink_tree(&r.txid);
         }
+        let _ = self.store.sync_deaths();
         self.restore_victims(&victims, utxos, tip);
     }
 
@@ -1648,8 +1658,8 @@ impl ActiveMempool {
         self.restore_victims(&victims, utxos, tip);
     }
 
-    /// Durable remove one live tx (confirm / RBF / eviction).
-    pub fn remove_txid(&mut self, txid: &Txid) -> Result<(), AcceptError> {
+    /// Drop one live tx from the graph and `pwrite` its slot DEAD. No `fdatasync`.
+    fn unlink_txid(&mut self, txid: &Txid) -> Result<(), AcceptError> {
         let entry = self
             .graph
             .get(txid)
@@ -1668,10 +1678,15 @@ impl ActiveMempool {
         Ok(())
     }
 
-    /// Remove `txid` and live mempool txs that spend it (1p1c child-fail rollback).
-    ///
-    /// Returns every txid dropped (spenders first, then `txid` if it was live).
-    pub fn remove_txid_tree(&mut self, txid: &Txid) -> Vec<Txid> {
+    /// Durable remove one live tx (confirm / RBF / eviction).
+    pub fn remove_txid(&mut self, txid: &Txid) -> Result<(), AcceptError> {
+        self.unlink_txid(txid)?;
+        let _ = self.store.sync_deaths();
+        Ok(())
+    }
+
+    /// Remove `txid` and live mempool txs that spend it, without syncing.
+    fn unlink_tree(&mut self, txid: &Txid) -> Vec<Txid> {
         let n_out = self
             .get_tx(txid)
             .map(|tx| tx.output.len() as u32)
@@ -1679,10 +1694,19 @@ impl ActiveMempool {
         let spent: Vec<OutPoint> = (0..n_out)
             .map(|vout| OutPoint { txid: *txid, vout })
             .collect();
-        let mut gone = self.evict_conflicts_with(&spent);
-        if self.remove_txid(txid).is_ok() {
+        let mut gone = self.unlink_conflicts(&spent);
+        if self.unlink_txid(txid).is_ok() {
             gone.push(*txid);
         }
+        gone
+    }
+
+    /// Remove `txid` and live mempool txs that spend it (1p1c child-fail rollback).
+    ///
+    /// Returns every txid dropped (spenders first, then `txid` if it was live).
+    pub fn remove_txid_tree(&mut self, txid: &Txid) -> Vec<Txid> {
+        let gone = self.unlink_tree(txid);
+        let _ = self.store.sync_deaths();
         gone
     }
 
@@ -1705,19 +1729,46 @@ impl ActiveMempool {
     }
 
     /// Remove live graph entries listed in `block_txids` (no orphan promote).
+    ///
+    /// One slots `fdatasync`, then one `meta` sync, for every tx this call drops.
     pub fn remove_live_txids(&mut self, block_txids: &[Txid]) -> Result<usize, AcceptError> {
-        let mut n = 0usize;
-        for txid in block_txids {
-            if self.graph.contains(txid) {
-                self.remove_txid(txid)?;
-                n += 1;
-            }
-        }
+        let stripped = self.unlink_listed(block_txids);
+        let _ = self.store.sync_deaths();
+        let n = stripped?;
         if n > 0 {
             let _ = self.maybe_compact();
             let _ = self.store.persist_if_dirty();
         }
         Ok(n)
+    }
+
+    /// `pwrite` DEAD for each live id. Does not sync.
+    fn unlink_listed(&mut self, block_txids: &[Txid]) -> Result<usize, AcceptError> {
+        let mut n = 0usize;
+        for txid in block_txids {
+            if self.graph.contains(txid) {
+                self.unlink_txid(txid)?;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// Confirmed ids plus live txs that spend `spent`, then one death sync.
+    pub fn remove_block_txids(
+        &mut self,
+        txids: &[Txid],
+        spent: &[OutPoint],
+    ) -> Result<(usize, Vec<Txid>), AcceptError> {
+        let stripped = self.unlink_listed(txids);
+        let gone = self.unlink_conflicts(spent);
+        let _ = self.store.sync_deaths();
+        let n = stripped?;
+        if n > 0 || !gone.is_empty() {
+            let _ = self.maybe_compact();
+            let _ = self.store.persist_if_dirty();
+        }
+        Ok((n, gone))
     }
 
     /// Like [`remove_for_block`], then promote orphans of confirmed parents via `utxos`.
@@ -1740,6 +1791,17 @@ impl ActiveMempool {
     /// A confirmed block that double-spends mempool txs does not list those
     /// txs in `txdata`; `remove_for_block` alone would leave them hanging.
     pub fn evict_conflicts_with(&mut self, spent: &[OutPoint]) -> Vec<Txid> {
+        let out = self.unlink_conflicts(spent);
+        let _ = self.store.sync_deaths();
+        if !out.is_empty() {
+            let _ = self.maybe_compact();
+            let _ = self.store.persist_if_dirty();
+        }
+        out
+    }
+
+    /// Drop live txs (and their descendants) that spend `spent`. No sync.
+    fn unlink_conflicts(&mut self, spent: &[OutPoint]) -> Vec<Txid> {
         let mut direct = Vec::new();
         for op in spent {
             if let Some(c) = self.graph.conflict_txid(op) {
@@ -1752,13 +1814,9 @@ impl ActiveMempool {
         let set = self.graph.conflict_set(&direct);
         let mut out = Vec::new();
         for id in set {
-            if self.remove_txid(&id).is_ok() {
+            if self.unlink_txid(&id).is_ok() {
                 out.push(id);
             }
-        }
-        if !out.is_empty() {
-            let _ = self.maybe_compact();
-            let _ = self.store.persist_if_dirty();
         }
         out
     }
@@ -1939,10 +1997,11 @@ impl ActiveMempool {
                     }
                 }
                 if missing_chain || check_mempool_structural(&tx, &chain_coins, tip).is_err() {
-                    let _ = self.remove_txid(&id);
+                    let _ = self.unlink_txid(&id);
                     removed = true;
                 }
             }
+            let _ = self.store.sync_deaths();
             if !removed {
                 break;
             }
@@ -1991,7 +2050,7 @@ impl ActiveMempool {
                     }
                 }
                 _ => {
-                    let gone = self.remove_txid_tree(&id);
+                    let gone = self.unlink_tree(&id);
                     rbitcoin_log::info!(
                         "mempool: sigops recompute evicted {id} ({} with spenders): inputs gone or cost over block budget",
                         gone.len()
@@ -1999,6 +2058,7 @@ impl ActiveMempool {
                 }
             }
         }
+        let _ = self.store.sync_deaths();
     }
 
     /// Lookup a live body (for tests / Electrum unconf).
@@ -3306,6 +3366,81 @@ mod tests {
             mp.extra_compact_txs().any(|t| t.compute_txid() == txid),
             "confirm/evict strip must keep the body for compact fill"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_live_txids_syncs_deaths_once() {
+        let dir = tmp_dir();
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let mut txs = Vec::new();
+        let mut map = HashMap::new();
+        for i in 0..6u8 {
+            let op = OutPoint {
+                txid: Txid::from_byte_array([i.saturating_add(1); 32]),
+                vout: 0,
+            };
+            let txout = TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            };
+            map.insert(op, coin(txout));
+            txs.push(spend_tx(op, 40_000));
+        }
+        let utxos = MapUtxoProvider { map };
+        let ids: Vec<Txid> = txs.iter().map(|tx| tx.compute_txid()).collect();
+        for tx in &txs {
+            mp.accept_tx(tx, &utxos, TIP_OK).unwrap();
+        }
+        mp.flush().unwrap();
+        let (meta_before, slots_before) = mp.death_sync_counts();
+        // Two deaths, one sync. Leave a live majority so compact does not sync meta again.
+        let n = mp.remove_live_txids(&ids[..2]).unwrap();
+        assert_eq!(n, 2);
+        let (meta_after, slots_after) = mp.death_sync_counts();
+        assert_eq!(meta_after, meta_before + 1, "block strip syncs meta once");
+        assert_eq!(
+            slots_after,
+            slots_before + 1,
+            "block strip syncs slots once"
+        );
+        assert_eq!(mp.live_count(), 4);
+        drop(mp);
+        let mp = ActiveMempool::open_or_create(&dir).unwrap();
+        assert_eq!(mp.live_count(), 4, "flushed strip must not resurrect");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_block_txids_syncs_confirmed_and_conflicts_once() {
+        let dir = tmp_dir();
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let mut map = HashMap::new();
+        let mut ids = Vec::new();
+        for i in 0..6u8 {
+            let op = OutPoint {
+                txid: Txid::from_byte_array([i.saturating_add(1); 32]),
+                vout: 0,
+            };
+            let txout = TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            };
+            map.insert(op, coin(txout));
+            let tx = spend_tx(op, 40_000);
+            ids.push(tx.compute_txid());
+            mp.accept_tx(&tx, &MapUtxoProvider { map: map.clone() }, TIP_OK)
+                .unwrap();
+        }
+        mp.flush().unwrap();
+        let (meta_before, slots_before) = mp.death_sync_counts();
+        let (n, conflicts) = mp.remove_block_txids(&ids[..2], &[]).unwrap();
+        assert_eq!(n, 2);
+        assert!(conflicts.is_empty());
+        let (meta_after, slots_after) = mp.death_sync_counts();
+        assert_eq!(meta_after, meta_before + 1);
+        assert_eq!(slots_after, slots_before + 1);
+        assert_eq!(mp.live_count(), 4);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
