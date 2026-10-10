@@ -3,8 +3,8 @@
 What an operator or library user should be able to **count on** at **1.0**.
 Day-to-day ranked work stays in [`quality.md`](./quality.md).
 
-**Today (0.7.99):** in-tree toward **0.8.0**. Last published tag is **0.7.0**
-(`v0.7.x` patch line). Current bytes and refuse:
+**Today (0.8.0):** named published 0.8 line. Patch branch is **`v0.8.x`**.
+Last 0.7 tag is **0.7.0**. Current bytes and refuse:
 [`SCHEMA.md`](../SCHEMA.md) (`SCHEMA_VERSION = 26`). Occupied 0.6.x
 (schema 20) Class A refuses (wipe + IBD).
 Electrum/Esplora need `--sh-index` (default off). BIP324 v2-only. Install is
@@ -16,7 +16,7 @@ inventory counts and the `run` bar: [`core-functional.md`](./core-functional.md)
 1.0 is the first **frozen-format, support-windowed** line. Not a Bitcoin
 Core clone, not a soak badge, not a desktop wallet.
 
-0.7.99 / 0.8 can ship any remaining gate without freezing the store.
+0.8 / 0.9 can ship any remaining gate without freezing the store.
 
 ---
 

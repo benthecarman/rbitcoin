@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Brief GitHub Release notes: platform blurb + CHANGELOG ### Highlights.
-# Full Keep a Changelog body stays in CHANGELOG.md.
+# Thanks live in that section. A committer not already named there is
+# thanked in the same block. Full Keep a Changelog body stays in CHANGELOG.md.
 set -euo pipefail
 
 ROOT=""
@@ -75,8 +76,29 @@ release_thanks_sentence() {
     range="HEAD"
   fi
   local -a others=()
+  release_keep_login() {
+    local login="$1"
+    [[ -n "$login" ]] || return 0
+    case "$login" in
+      reardencode|rearden-grok|rearden-grok\[bot\]|dependabot|dependabot\[bot\])
+        return 0
+        ;;
+    esac
+    if [[ -n "$skip" ]] && printf '%s' "$skip" | grep -q "@${login}"; then
+      return 0
+    fi
+    local seen=0 o
+    for o in "${others[@]+"${others[@]}"}"; do
+      [[ "$o" == "$login" ]] && seen=1
+    done
+    [[ "$seen" -eq 0 ]] && others+=("$login")
+  }
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
+    if [[ "$line" =~ ^Merge\ pull\ request\ \#[0-9]+\ from\ ([A-Za-z0-9-]+)/ ]]; then
+      release_keep_login "${BASH_REMATCH[1]}"
+      continue
+    fi
     if [[ "$line" == Co-authored-by:* ]]; then
       email="${line##*<}"
       email="${email%>}"
@@ -84,16 +106,8 @@ release_thanks_sentence() {
       email="$line"
     fi
     login="$(release_login_from_email "$email" || true)"
-    [[ -n "$login" ]] || continue
-    if [[ -n "$skip" ]] && printf '%s' "$skip" | grep -q "@${login}"; then
-      continue
-    fi
-    local seen=0 o
-    for o in "${others[@]+"${others[@]}"}"; do
-      [[ "$o" == "$login" ]] && seen=1
-    done
-    [[ "$seen" -eq 0 ]] && others+=("$login")
-  done < <(git log "$range" --format='%ae%n%b')
+    release_keep_login "$login"
+  done < <(git log "$range" --format='%ae%n%s%n%b')
   local rest=""
   if ((${#others[@]})); then
     local joined=""
@@ -109,29 +123,8 @@ release_thanks_sentence() {
   printf '%s\n' "$rest"
 }
 
-release_version_thanks() {
-  awk -v ver="$VER" '
-    $0 ~ "^## \\[" ver "\\]" { grab = 1; next }
-    grab && /^## / { exit }
-    grab && /^### Thanks[[:space:]]*$/ { insec = 1; next }
-    grab && insec && /^### / { exit }
-    insec { print }
-  ' "$ROOT/CHANGELOG.md"
-}
-
 hl="$(release_changelog_highlights "$VER" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')"
-once="$(release_version_thanks | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')"
-authors="$(release_thanks_sentence "$once" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')"
-thanks=""
-if [[ -n "$once" && -n "$authors" ]]; then
-  thanks="${once}
-
-${authors}"
-elif [[ -n "$once" ]]; then
-  thanks="$once"
-elif [[ -n "$authors" ]]; then
-  thanks="$authors"
-fi
+authors="$(release_thanks_sentence "$hl" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')"
 note="rbitcoin v${VER}
 
 Linux **musl x86_64** is the operator binary (statically linked).
@@ -142,11 +135,9 @@ codesigned, **not notarized** (\`xattr -d com.apple.quarantine\`).
 
 ${hl}
 "
-if [[ -n "$thanks" ]]; then
+if [[ -n "$authors" ]]; then
   note="${note}
-### Thanks
-
-${thanks}
+${authors}
 "
 fi
 note="${note}

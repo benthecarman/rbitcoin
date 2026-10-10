@@ -24,7 +24,8 @@ refuses to tag it. `--patch` refuses to create it (`Z` stays `< 99`).
 Homes that must match on a ship commit: `Cargo.toml`
 `[workspace.package].version`, `nix/rbitcoin.nix` `version`, `CHANGELOG.md`
 `## [X.Y.Z]` with a **`### Highlights`** subsection (1–10 bullets,
-operator-facing). `./scripts/release-gate.sh` checks that. Narrative banners
+operator-facing, then the thanks paragraph when this release has one).
+`./scripts/release-gate.sh` checks the bullets. Narrative banners
 (README, SECURITY, `docs/road-to-1.0.md`, `docs/experimental-mainnet.md`)
 are edited on the same bump PR; the scripts do not rewrite them.
 
@@ -33,11 +34,13 @@ are edited on the same bump PR; the scripts do not rewrite them.
 an empty `### Highlights`. The ship PR **writes those bullets**
 (brief: what an operator should know, not the full Keep a Changelog body).
 `./scripts/release-notes.sh` is the GitHub Release / annotated-tag text:
-platform blurb + Highlights + a pointer at CHANGELOG. `release.yml` calls
-that script. Do not dump Unreleased into the GitHub Release.
+platform blurb + Highlights + a pointer at CHANGELOG. Thanks are part of
+Highlights. `release.yml` calls that script. Do not dump Unreleased into
+the GitHub Release.
 
-Existing line: **`v0.7.x`** (tag `v0.7.0`). Next minor from
-today’s `0.7.99` is **0.8.0**, then **`v0.8.x`**, then master **0.8.99**.
+Existing line: **`v0.8.x`** (this ship is **0.8.0**). Previous published line
+is **`v0.7.x`** (tag `v0.7.0`). After merge, master becomes
+**0.8.99** toward **0.9.0**.
 
 ---
 
@@ -59,8 +62,10 @@ Fixed
 The first non-empty line is the category: `Added`, `Changed`, `Deprecated`,
 `Removed`, `Fixed`, or `Security`. The rest is the Keep a Changelog bullets.
 One fragment per pull. A stack adds one file on each branch.
-`thanks.md` is not a category fragment. It is the one-shot GitHub Release
-thanks, folded into `### Thanks` and deleted by the same cut.
+`thanks.md` is not a category fragment. It is one release's thanks
+paragraph. The cut places it under `### Highlights` and deletes it.
+Write it as prose, not a `- ` bullet, so it does not count toward the
+ten. There is no `### Thanks` section.
 
 `./scripts/release-cut.sh --minor`, `--major`, and `--patch` fold every
 fragment into `## [Unreleased]` under the matching `###` heading, delete
@@ -170,11 +175,14 @@ From current `origin/master` at `X.Y.99`:
 
 1. Worktree `release/X.(Y+1).0`. `./scripts/release-cut.sh --minor`.
 2. Write **`### Highlights`** (brief, operator-facing; at most ten bullets).
-   `release-notes.sh` adds **`### Thanks`** only when this version's
-   changelog has that section, or when a commit since the previous tag
-   is by someone other than `reardencode` and `rearden-grok[bot]`.
-   `changelog.d/thanks.md` is one release: the cut folds it into
-   `### Thanks` and deletes it. Edit narrative
+   Leave the thanks paragraph from `changelog.d/thanks.md` at the end of
+   that section. `release-notes.sh` keeps thanks in Highlights. When a
+   commit since the previous tag is by someone other than `reardencode`
+   and `rearden-grok[bot]`, and that login is not already named there, the
+   notes add `Thanks to @login for changes in this release.` in the same
+   block. A login counts when its commit email is a GitHub noreply address,
+   or when a merge commit says `from login/`. The maintainer, the bot, and
+   dependabot stay out. Edit narrative
    banners to the new **X.(Y+1).0** (and that `vX.(Y+1).x` will be the
    patch line). Keep the detailed Unreleased body under the new heading.
 3. `./scripts/release-gate.sh` and `./scripts/release-notes.sh` must
@@ -198,7 +206,8 @@ From current `origin/master` at `X.Y.99`:
 2. Worktree from `origin/vX.Y.x`. Cherry-pick the change (must apply). If
    master also needs it and does not have it, say so — do not silently
    skip master.
-3. `./scripts/release-cut.sh --patch`. Write **`### Highlights`**. Narrative
+3. `./scripts/release-cut.sh --patch`. Write **`### Highlights`**
+   (bullets, then the thanks paragraph, same as a minor). Narrative
    as needed.
 4. PR → **`vX.Y.x`** (not `master`). Same ship labels and gates.
 5. Merge, fetch, checkout `origin/vX.Y.x`, `./scripts/release-post.sh`

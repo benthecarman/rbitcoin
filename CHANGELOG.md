@@ -9,6 +9,88 @@ before 1.0).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-09
+
+Named published **0.8** line. **Not 1.0.** Patch branch is `v0.8.x`. Schema 26
+opens a schema 24 or 25 datadir in place (`header.body` 96 B → 88 B, `meta`
+rewritten to 26). A store older than schema 22 refuses (wipe + IBD), including
+occupied **0.6.x**. Default mainnet `--milestone` still names height 840000
+and skips scripts only on that header path once chain work meets the minimum.
+Signet’s default milestone is 0. `--sh-index` default off. BIP324 v2-only.
+GitHub Release: Linux musl (operator) + Windows CRT-static PE + Darwin aarch64.
+
+### Highlights
+
+- **Schema 26 opens a 0.7 datadir in place.** Schema 24 and 25 rewrite
+  `header.body` from 96 B to 88 B and `meta` to 26. A store older than schema
+  22, including occupied 0.6.x, refuses with one wipe-and-IBD line.
+- **Mainnet script skip is path-anchored.** The default milestone still names
+  height 840000 and block
+  `0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5`. Scripts
+  skip only on that header path once chain work meets Core
+  `nMinimumChainWork`. Signet’s default milestone is 0 (every script). An
+  explicit `--milestone HEIGHT` stays height-only.
+- **Initial sync keeps moving on ordinary connections.** One peer serves
+  headers. The others download blocks, at most 64 blocks or 16 MiB in
+  flight, sized from recent bodies. A peer holding the tip block is
+  replaced only after 5 seconds, and only when a free peer would finish
+  it in half the time. A full serve queue waits out the rest of a
+  `getdata` instead of dropping it.
+- **Consensus checks match Bitcoin Core where they used to disagree.**
+  BIP30 is off only when the header at BIP34 height is that network’s
+  BIP34 block, and it is always on from height 1,983,702. A confirm batch
+  cannot spend an output created by a later block in that batch. The
+  genesis coinbase is not a spendable coin. An empty signature in legacy
+  `CHECKMULTISIG` deletes `OP_0` from scriptCode. A bad copy of a valid
+  block is requested again and is not cached as invalid.
+- **Peers and RPC fail closed under load.** Counts above 50,000 in `inv`,
+  `getdata`, and `notfound` fail decode. Compact-block and block
+  transaction counts are rejected before allocation. The RPC body cap is
+  2 MiB, and a full work queue is HTTP 503 before the handler. A session
+  pauses once its outbound queue passes 4 MiB. An unpaged scripthash join
+  above `--max-sh-creates` (default 10000) is refused.
+- **Wallets, Lightning nodes, and explorers have a setup guide.**
+  `docs/wallets.md` and `docs/lightning.md`. Electrum and Esplora serve
+  Electrum, Sparrow, Liana, Specter, Cake Wallet, BlueWallet, BitBox App,
+  Envoy, and BDK (including Alby Hub). Wasabi’s full-node path uses
+  `getblockfilter` and `--rpc-cookie-file` (HTTP Basic on TCP).
+  `getnetworkinfo.version` stays 190000 (Core 0.19’s client integer); the
+  semver stays in `subversion`. CLN (`bcli` and `sauron`), ldk-node
+  (Esplora, Electrum, or REST), and LND with `bitcoind.rpcpolling` use
+  this node as the chain source. Esplora `/internal/*` on the unix socket
+  is the mempool.space electrs drop-in. `/fee-estimates` keeps the
+  estimator’s precision. `/fees/recommended` and `/ws` are 404.
+- **Feerate uses sigop-adjusted size.** Admission, RBF, eviction, estimates,
+  and `-blockmintxfee` use `max(weight, sigop_cost × bytes_per_sigop)`
+  (default 20, `--bytes-per-sigop`, `0` disables). A transaction whose sigop
+  cost reaches the template budget is rejected. Template selection applies
+  the mintxfee floor per chunk and keeps the block sigop cap.
+- **Fee quotes follow a log grid and a fullness blend.** About 100 steps per
+  decade from min relay (0.1 sat/vB) through 1000 sat/vB, plus one open
+  bucket above that. The published rate is `(1−α)·history + α·live flow`.
+  α is decayed admitted weight over about 1.44M WU (150s half-life). History
+  is filled from `txstat` (at most 1 GiB; each block’s vsize-weighted p10
+  of individual rates). `estimatesmartfee` returns `{feerate, blocks}`, or
+  `{errors, blocks}` with no `feerate` when it has no estimate, and
+  `feerate` is at least `mempoolminfee`.
+- **Block filters and silent-payment tweaks build during IBD, and after
+  it when they are behind.** With the index on from the start, each
+  confirmed block is built on the script pool and appended on the confirm
+  write. A restart gap of at most 2,016 blocks is sealed before confirm.
+  A larger gap, including an index enabled on an already synced datadir,
+  is built afterward by `rbtc-idx-wb` (`index: build`) and does not hold
+  the node in initial download. `NODE_COMPACT_FILTERS` is advertised once
+  filters reach the tip. With `--datadir-cold`, `blockfilter` and
+  `sp_tweaks` must sit on the cold store.
+- **Spend annotations recover after a crash past the tip seal.** A missing
+  spent slot stays unspent until open replays above the `spend_durable`
+  marker. `rbtc-spend-sync` checkpoints about every ten minutes, and once
+  more on shutdown.
+
+Thanks to @otaliptus for the security review, and to @dergoegge, @rob1ham, and @1440000bytes for earlier findings.
+
+Thanks to @benthecarman, @average-gary, @bobberb, @Hero-Gamer, @bkeroack, @xstoicunicornx, and @RandyMcMillan for changes in this release.
+
 ### Fixed
 
 - **`-blockmintxfee` floors whole chunks:** `getblocktemplate` / `generate`
@@ -51,8 +133,9 @@ before 1.0).
 - **Spend annotations survive a crash after the tip seal.** A missing
   spent slot is unspent, so open replays annotations above the
   `spend_durable` marker (a missing file replays from genesis) and only
-  then advances the marker. The write thread `sync_data`s those stems
-  every 8 batches or 30 seconds, not on every Class C barrier. The tip
+  then advances the marker. `rbtc-spend-sync` `sync_data`s those stems
+  about every ten minutes, and once more on shutdown, not on every Class C
+  barrier. The tip
   window stays at least 6 blocks and reaches back to the durable-through
   height. `tip_seal`, `tx.head` meta, and the marker `fsync` their parent
   directory after rename.
@@ -92,7 +175,8 @@ before 1.0).
 - **RPC and Esplora limits:** bearer auth runs before the body is read
   (401 with no body bytes). The HTTP body cap is `RPC_MAX_HTTP_BODY`
   (2 MiB, 413 above it). `--rpc-work-queue` defaults to 16 (HTTP 503 when
-  full; **0** unlimited). `waitforblock`, `waitforblockheight`,
+  full). `0` and an omitted value are that same queue of 16. `waitforblock`,
+  `waitforblockheight`,
   `waitfornewblock`, and `getblocktemplate` longpoll wait off the blocking
   pool. Esplora `X-Rbitcoin-Client` is a join key only for a unix socket
   or with join-header trust; loopback alone is not.
@@ -119,9 +203,11 @@ before 1.0).
 - **IBD header and body intake:** a headers batch that fails validation
   does not grow the work path or explore lists (each list is capped at
   64). An unsolicited or already-queued body is dropped before the
-  payload copy. Assign does not issue getdata when queue bytes plus
-  outstanding hashes at 4 MiB each would pass the assign-stop. A body
-  that was requested is still queued.
+  payload copy. Assign prices a new getdata hash at the largest received
+  wire length among the most recent 32 bodies, never above 4 MiB. Until
+  eight bodies have been recorded the charge stays 4 MiB. A hash already
+  in flight on another peer is still issued and does not add another
+  charge. A body that was requested is still queued.
 - **Header accept:** a failed `ensure_header` does not hold the body or
   enter tip accept. A non-genesis block whose previous hash is all zeros
   is rejected while a tip exists. Work sums report overflow instead of
@@ -149,8 +235,8 @@ before 1.0).
   corruption.
 - **CI quick checks share one runner.** Job `qc` runs fmt, ast-grep,
   deny, the script self-tests, clippy, then nixos-module-eval. `test`,
-  `windows`, and `macos` stay on their own runners. Coverage and mutants
-  wait for `qc` and `test`.
+  `windows`, and `macos` stay on their own runners. Coverage waits for
+  `qc` and `test`. Mutants are a nightly run, not a pull-request check.
 
 - **Input backfill reads `seqsigwit.body` in 16 MiB spans.** Open used
   to `pread` the locator window and the body once per create. A chunk
@@ -219,7 +305,8 @@ before 1.0).
   oracle.
 
 - **sendraw / testmempoolaccept / submitpackage junk hex is `-22`:**
-  `decode_tx_hex` matches `decoderawtransaction` (`TX decode failed`).
+  those three share `decode_tx_hex` (`TX decode failed:`).
+  `decoderawtransaction` is `TX decode failed` with no colon.
   Core `testmempoolaccept(['ff00baar'])`. String `rawtxs='ff00baar'` stays
   `-32602 rawtxs array required` (inventory skip).
 
@@ -227,6 +314,890 @@ before 1.0).
   Active-chain lookup (`tx_fk_by_txid_tip` + `is_confirmed_strong`) before
   `test_accept`. Live mempool dups stay `txn-already-in-mempool`;
   archive-only after `invalidateblock` is not already-known.
+
+
+- Mainnet BIP30 turns off above height 227931 only when the confirmed header
+  there is Bitcoin Core's BIP34 block. The previous constant was a different
+  hash, so every later block kept scanning txids for an unspent overwrite.
+
+
+- **Compact fuzz shares Core's mock clock.** Header stamps stay within
+  two hours of regtest genesis, and the follow accept uses that same
+  clock. A split panic includes Core's `submitblock` reason.
+
+
+- **Compact fuzz oracle clears a sticky invalidate.** After a compared
+  accept, Core `invalidateblock` keeps the header invalid. The next
+  `submitblock` of that body is `duplicate-invalid`. The harness
+  `reconsiderblock`s once and scores the second reply. A reason that
+  remains is still a disagreement.
+
+
+- **BIP30 ignores unspendable outputs.** A repeated txid whose earlier
+  instance has every spendable output spent is accepted even when that
+  instance also carries an `OP_RETURN` or over-10,000-byte output.
+  Bitcoin Core never adds those outputs to the coin view, so they could
+  not be overwritten; rbitcoin rejected the block as `bad-txns-BIP30`.
+- **The genesis coinbase is not spendable.** Bitcoin Core never adds the
+  genesis block's coinbase to the coin view. A block that spends it is now
+  rejected as a missing prevout on every connect path, with or without
+  script checks. The transaction stays indexed for RPC and Electrum.
+
+
+- **`--connect` peers are `manual`, as in Core.** `getpeerinfo` reported a
+  `--connect` peer as `outbound-full-relay`. Core counts `manual` peers as
+  preferred download peers, and so does this node now: one whose outbound
+  peers all come from `--connect` or `addnode` replaces a stalling
+  headers-sync peer instead of waiting on it. As in Core, a `--connect` peer
+  is no longer dropped for missing `NODE_NETWORK`, and `--seednode` is not
+  dialled under `--connect`.
+
+
+- **A `--connect` address is redialled when its session drops.** Only
+  `--connect` hostnames were retried. An IP, onion, I2P or CJDNS target got
+  one dial at startup, so a node whose `--connect` peer restarted or was
+  disconnected stayed without peers until it was restarted. As in Core,
+  once the node follows the tip, every `--connect` target without a live
+  session is redialled every 2 s, including any that the startup dial
+  skipped (it dials at most three).
+- **A redial does not stack while a dial is still connecting.** The 2 s
+  redial of `--connect` and `addnode add` targets skips a target whose
+  previous dial has not finished connecting. Before, a target behind a slow
+  SOCKS circuit or a host that drops SYNs got a new dial every pass, and
+  each one that connected became its own session. An outbound connect now
+  gives up after 8 s (90 s for I2P), as IBD and tip-follow dials already
+  did, so a proxy that never answers cannot hold a target forever.
+
+
+- **Signet `OP_TRUE` can be mined on demand.** `generatetoaddress` /
+  `generate` / `generateblock` work on regtest and on a signet whose
+  challenge is exactly `OP_TRUE` (signet bits, empty BIP325 solution).
+  `getblockchaininfo.signet_challenge` is present on signet. A signet
+  solution failure is reported as `bad-signet-blksig`.
+- **`getblockfilter` serves a sealed row, or one block past a sealed
+  parent.** A best-chain height already in the index uses that row. A
+  block whose parent filter header is sealed, including a stale branch
+  walked back to that fork point, is rebuilt from the body. An unsealed
+  best-chain gap is “Filter not found. Block filters are still in the
+  process of being indexed.” An unknown `filtertype` is `-5`. REST
+  `/rest/blockfilter/` stays watermark-only.
+- **`submitpackage` package-evaluates a child-with-parents remainder.**
+  Members that failed static min relay, the dynamic mempool floor, or
+  missing inputs are retried together, including when the child spends a
+  parent already in the mempool. The dynamic floor is waived when the
+  remainder meets static min relay. Effective feerate for that remainder
+  is the summed modified fees over the summed vsizes. Trim runs once
+  after the package; a tx that was admitted and then dropped is
+  `mempool full`. Package-admitted txs use the same relay-age clock as
+  an individual admit, and `prioritisetransaction` deltas count in the
+  feerate announced to peers. A member whose own feerate is above
+  `maxfeerate` is rejected and does not rescue the rest of the package.
+  An individual admit still reports the transactions it replaced.
+- **`getmempoolinfo.maxmempool` is the virtual-size byte cap.** The hub
+  budget stays weight (`--mempool-size-mb` × 1_000_000). The Core field is
+  that budget divided by 4, the same unit as `bytes`.
+  `rbitcoin_mempool_max_weight` still reports weight.
+- **An unspendable output is still a coin.** A script that starts with
+  `OP_RETURN`, or is longer than 10_000 bytes, resolves and fails in the
+  script. Core functional `generateblock` text for that spend is shim-only.
+
+
+- **Misbehavior no longer disconnects `noban` peers.** A peer with the
+  `noban` permission (`--trusted`, or `noban` in `--net-permission` /
+  `--net-permission-bind`) that sends an invalid block or header is
+  logged and kept, as in Core.
+- **Rejected block headers log Core's reason.** A block whose header fails
+  contextual checks logs `bad-version(0x…)` or `time-too-new` again.
+- **Relayed addresses go out in one `addrv2` per peer.** Previously each
+  address was sent as its own message.
+- **Parked RPC waits show in `getrpcinfo`.** `waitfor*` and a
+  `getblocktemplate` longpoll are listed in `active_commands` while they
+  wait, and a longpoll logs its request when it arrives.
+- **A compact-block peer is not stuck on an old partial.** A peer's pending
+  partial for a block that connected through another peer is dropped, so
+  the peer's next compact block still gets `getblocktxn`.
+- **Header sync on a fork no longer slows down with its length.** Each
+  `headers` message stores only headers not already stored.
+- **Ping timeouts wait for `--peer-timeout`, as in Core.** A mock-clock
+  jump inside the peer timeout no longer drops a peer.
+
+
+- **A same-slot store probe and a full RPC work queue no longer fail when the schedule is unlucky.** The probe keeps drawing until the mixed key shares the page, and a full work queue answers HTTP 503. A live follow session counts an unknown BIP324 short id as `*other*` and stays connected.
+
+
+- **A taken Esplora port no longer fails the cross-surface journey.** The journey binds `127.0.0.1:0` and reads the address the node publishes under `{datadir}/run/*.addr`. A failed Electrum or Esplora bind is not retried on the tip loop.
+
+
+- **Operator and schema docs match the node.** Blocks in transit per peer
+  are 64. `--mempool-size-mb` is N × 1_000_000 weight units. Scripthash
+  extract workers are one per 1.5 GiB. Confirm commits the height fence
+  and `confirmed[]` before scripthash write-behind. Schema file headers
+  are version 26, including block-filter kind 24 and `input.*`.
+- **IBD and mempool operator notes match the code.** Densify is 32
+  hashes per peer (64 for a fast outlier). Cluster caps are 64 txs and
+  101 kvB. The mempool sidecar is schema 3. `tip: accept` is DEBUG.
+  Linux falls back to pread when io_uring cannot open.
+- **CLI names in the product docs are `--sh-index` and `--sp-tweaks`.**
+  Electrum and Esplora start with the scripthash index off. `generate*`
+  also runs on an `OP_TRUE` signet. Electrum `protocol_max` is 1.6.
+  SV2 template-provider plans A–C are landed. CLN and ldk-node chain
+  backends are the contract in `lightning.md` (Q-69 closed).
+
+
+- **Operator schema upgrade matches schema 26.** Opening a schema 24 or 25
+  datadir shrinks `header.body` from 96 B to 88 B and rewrites `meta` to 26.
+  The operator table no longer describes a rewrite that stops at 25 or grows
+  headers from 88 B to 96 B.
+- **Finding 085 is closed on IBD.** A coinbase-less 64-byte body is a bad
+  copy: IBD drops it and asks again, and does not cache the hash as invalid.
+
+
+- **Electrum: an unused scripthash has status `null`, not `""`.**
+  `blockchain.scripthash.subscribe` answered `""` for a script with no
+  history, and a push for a script whose history emptied (an RBF victim)
+  sent `""` too. The protocol says `null`, and wallets read any non-null
+  status as a used address: Sparrow kept deriving past its gap limit
+  (`../0/2542` on a wallet whose last used index is far lower) and filled
+  the per-connection subscription cap. The subscribe reply and both
+  notification paths now send `null`, and a subscribe that answered `null`
+  still deduplicates a later push that is still empty.
+
+
+- **Esplora paged address history is served above `--max-sh-creates`.**
+  `/txs`, `/txs/chain`, and `/txs/summary` return their page when a script
+  has more creates than the cap. Unpaged stats and `/utxo` still return 503.
+- **`/txs/summary` rows include `tx_position`**, and `?asof=` is accepted on
+  that route. The page stays 25 rows.
+- **Esplora tx JSON omits an empty `witness`.** `inner_redeemscript_asm` is
+  only the P2SH redeem script, and `inner_witnessscript_asm` is only a
+  P2WSH witness script or a Taproot script-path leaf.
+- **`/block/:hash/txs/:start` at or past the last tx is 404**
+  `start index out of range`.
+
+
+- **Fee estimates answer confirm targets between the computed depths.**
+  The estimator still prices 1, 2, 3, 4, 5, 6, 10, 20, 144, 504, and 1008
+  blocks. Any other target from 1 to 1008 is the straight line between the
+  computed rates on either side, in whole sat/kvB, or the last defined rate
+  past the far end. `estimatesmartfee`, `estimaterawfee`, and Electrum
+  `blockchain.estimatefee` use that curve. Esplora `/fee-estimates` includes
+  each integer from 1 through 25, plus 144, 504, and 1008, when that target
+  has a rate.
+
+
+- **Consensus: an empty signature in legacy `CHECKMULTISIG` deletes `OP_0`
+  from scriptCode.** Core's FindAndDelete of an empty signature removes
+  every `OP_0` opcode before the other signatures are hashed. We left
+  scriptCode unchanged, so a spend that mixed an empty signature with
+  signed and malformed ones could get the opposite result from Core,
+  in either direction.
+
+
+- **Consensus: a block that spends an output created by a later block is
+  rejected in IBD and catch-up.** When several blocks were confirmed in
+  one batch, an input could bind to a transaction in a later block of
+  that batch. Bitcoin Core connects one block at a time and rejects the
+  block with `bad-txns-inputs-missingorspent`; rbitcoin accepted it, and
+  a later block could then spend the same output again. The batch is now
+  rejected, and the retry names the spending block. A spend slot that
+  names a confirmed spender below the output's own height is now a store
+  invariant error, not an unspent output.
+
+
+- **`getblocktemplate` fees come from the selection.** Each
+  transaction's `fee` and `sigops`, and the `coinbasevalue`, are read
+  under the same mempool lock that selected it. A transaction evicted
+  while the template was built no longer reports `fee: 0` and
+  understates `coinbasevalue`.
+
+
+- **`gettxout` and `scantxoutset` no longer report the genesis coinbase.**
+  Bitcoin Core never adds the genesis block's coinbase output to the UTXO
+  set. `gettxout` for that outpoint now returns `null`, REST `getutxos`
+  reports it as missing, and `scantxoutset` leaves it out of `unspents`
+  and `total_amount`. Electrum and Esplora are unchanged; Esplora matches
+  Blockstream/mempool electrs, which index genesis.
+- **`getrawtransaction` refuses the genesis coinbase txid.** It returns
+  Core's `-5` "The genesis block coinbase is not considered an ordinary
+  transaction and cannot be retrieved". REST `/rest/tx/` answers `404`
+  `<txid> not found` for that txid, as Core does.
+
+
+- **`getblockfilter` does not rebuild an unsealed index gap.** A best-chain
+  block whose parent filter header is not sealed returns “Filter not found.
+  Block filters are still in the process of being indexed.” A block whose
+  parent header is already sealed is still built, and a stale branch is
+  rebuilt only back to that sealed fork point.
+
+
+- **`getblock` verbosity 1 carries `size`, `strippedsize`, and `weight`**,
+  as Bitcoin Core does. They come from `txstat` (no block reconstruct) and are
+  left out only when the body is unavailable. Stock mempool's block indexer
+  stores `size` NOT NULL, so without them every block failed to save
+  (`Column 'size' cannot be null`) and its tip, fees, and block list stalled.
+
+
+- **A `getdata` past the serve queue waits; it is not dropped.** When 16
+  served blocks or 4 MiB were already queued to a peer, the rest of its
+  `getdata` was dropped without a `block` or `notfound`. The peer waited
+  until its stall timer, and an rbitcoin IBD peer then disconnected an
+  honest node. As in Core, the session now keeps the rest of the request,
+  sends the `notfound` it has, and serves every hash in order once the
+  writer drains. No new message from that peer is read until then, but
+  pings and the ping timeout still run. At most 16 served blocks sit in
+  one peer's queue. A compact tip announce does not take a serve slot.
+  A `getblocktxn` reply (`blocktxn` or the full block) does, until the
+  writer drains.
+
+
+- **A side branch with a bad header no longer rewinds the tip.** Headers on a
+  held branch are checked before any disconnect. A later block that claims
+  enormous work without a valid proof of work is remembered invalid, and a
+  heavier valid held branch can still become the tip. A store fault during
+  that check is not cached as an invalid block.
+
+
+- **A header peer that does not answer is not asked forever.** One header
+  request is in flight. The same peer serves the walk and the queue refill:
+  refill while the download queue is under 16,000 headers, walk while it is
+  above that and still under the 64,000 soft cap. When the ask expires, the
+  reservation moves; a second miss disconnects that peer. A late reply from
+  the peer that was asked still extends the header walk when it builds on
+  the tip, and that accept is logged. A confirmed reorg below the milestone
+  drops the latched block 840,000 hash and logs that script checks stay on;
+  the old hash is not put back. A restart whose `header.adopt` is missing
+  or does not parse does not restore checkpoints, and still notes queued
+  headers that link from the confirmed tip, which can turn script skip back
+  on. Checkpoints from a file that does not parse are not used.
+
+
+- **A headers batch whose first header does not connect skips the longer
+  prefix search.** After the full batch failed, IBD tried about ten longer
+  prefixes even when the first header could not be stored. The search now
+  stops after that first header fails. A connected first header still
+  binary-searches the rest of the batch.
+
+
+- **Header download refills while the walk runs ahead.** One peer does
+  both lanes, and only one of them is in flight. Below 16,000 queued
+  headers that peer refills from the stored tail; above that it walks.
+  An empty queue is rebuilt from headers still on the work path before
+  that refill. A reply is classified by the hash it builds on: a walk
+  continuation is a checkpoint while the walk is ahead, and a stored
+  header once the walk has caught that top.
+
+
+- Header look-ahead stops asking a peer after one short reply that does not
+  extend the candidate, once checkpoint work meets the floor. A full
+  2,000-header window can still build a lighter fork, and a later block
+  `inv` puts the peer back on the walk. The download queue still stops
+  at 64,000 headers, and only one header request is in flight.
+
+
+- Header look-ahead starts at the stored tip on the first ask. A solicited
+  continuation of that tip is a checkpoint, so the walk runs ahead of the
+  download queue and the `ibd: headers` line is logged.
+
+
+- **IBD retries a wave after a local store fault in load, scripts, or
+  write.** Load offered the wave's bodies back but left lookup's consume
+  mark past them. Scripts and write, and an io_uring session recover in any
+  of the three, did not offer them back at all. Lookup never took those
+  heights again unless a later wave, a disconnect, or a reorg re-armed it,
+  so near the tip IBD stalled. Each stage now re-arms lookup at the tip and
+  then offers the bodies back. The retry keeps the whole wave, except a
+  pin-stage fault in a multi-block wave, which retries one block at a time.
+
+
+- **A peer can no longer make IBD give up on a valid block by sending a
+  bad body for it.** A body with no transactions, garbage transactions,
+  a repeated tail (CVE-2012-2459), a first transaction that is not a
+  coinbase plus any 64-byte transaction, or witness data the coinbase
+  does not commit to marked the block hash invalid, and IBD never asked
+  for it again. Block checks now test the merkle root before the other
+  body rules, as Bitcoin Core does. IBD treats these failures as a bad
+  copy of the block: it drops the body and requests the block again.
+  That request is no longer skipped: before, near the end of IBD, a
+  block whose bad body was dropped could wait forever.
+  When the bad body is checked in a batch with other blocks, IBD retries
+  the batch one block at a time, so only the bad body is dropped.
+- **IBD no longer stalls after a confirm reject.** A reject puts the
+  bodies of the retried blocks back on the body queue and restarts the
+  confirm lookup at the tip. A lookup pass that started before the reject
+  could then move the restart point past those bodies, so they were never
+  confirmed and IBD waited on blocks it already had.
+- **IBD retries a rejected batch from the bodies it already has.** When
+  a batch fails in the script or write stage and is retried one block
+  at a time, its bodies go back on the body queue. Before, IBD
+  downloaded them again.
+- **IBD disconnects a peer that sends a mutated block.** The peer's
+  address also cools down, so the block is requested from another peer
+  when one is available. A `noban` peer stays connected, as in Bitcoin
+  Core. Unlike Core, and unlike tip-follow, a manual (`--connect`) peer
+  is also disconnected. Tip-follow `misbehaving` leaves a manual peer
+  connected.
+- **A block with a second coinbase or a repeated transaction is now
+  remembered as invalid.** These blocks reported `bad-txns-duplicate`,
+  the reason Bitcoin Core keeps for a mutated body, so the node did not
+  remember them and asked for them again. They now report Core's
+  `bad-cb-multiple` and `bad-txns-inputs-missingorspent`.
+
+
+- **IBD no longer stalls when a peer re-sends stored headers.** Headers
+  the IBD already stored keep the store row they were accepted with.
+  Checking them again walked each one back to the connected tip, and a
+  fresh mainnet sync from one peer stopped after 16 blocks.
+
+
+- A restart at the validated tip leaves IBD once no connected peer can
+  extend that tip. An advertised `version.start_height` on a chain nobody
+  serves no longer keeps the node out of tip mode.
+- A header the walk already holds is fetched even when every peer's
+  connect-time `version.start_height` is still the previous tip. A block
+  announced after restart is downloaded instead of leaving the walk one
+  above the confirmed tip.
+
+
+- **A re-sent header run past the height walk cap is one walk.** When the
+  first stored header cannot resolve a height within 10,000 ancestor steps,
+  that miss is kept on the batch. Later headers in the same run do not each
+  walk to the cap again.
+
+
+- IBD treats a tip gap as a hole once the body queue meets any of: a quarter
+  of the confirm-time block window, a quarter of the configured assign-stop
+  (default 1 GiB), or 1000 blocks. Below all three the gap is the frontier:
+  tip+1 gets one peer and densify keeps filling ahead. Gaps in the queue
+  count. The 100 MiB free floor remains the densify horizon only.
+
+
+- **IBD no longer re-requests a tip-hole block from a peer that still owes
+  it.** Dropping a tip-hole owner forgot the getdata it was sent, so the
+  next assign pass asked the same peer again. Peers answer every getdata,
+  so on signet with 30 peers they spent 77–85% of upload re-sending blocks
+  already stored, and tip+1 waited behind those copies for up to 55s. A
+  dropped owner now keeps the request and is not asked for that hash again.
+  Peers who still owe the block count toward its race cap, so dropping one
+  does not free a slot for a peer that was never asked.
+- **A tip-hole owner with other getdata queued is dropped only when it
+  is actually slow.** Every peer has several blocks in flight during IBD,
+  so the owner was dropped and replaced on every 50ms assign pass. It is
+  now dropped only after holding the hash for 5s, and only when a free
+  peer's expected drain time is at most half the owner's.
+- **Blocks held by a dropped peer are requested again right away.** A
+  peer disconnected as stalled or relative-slow, or a notfound, freed its
+  blocks, but densify had already moved its scan cursor past them, so they
+  were requested again only once they held up the tip.   The cursor now moves
+  back to the lowest freed height.
+- **A hung densify block keeps its getdata when no faster peer has a free
+  slot.** Erasing that record let a later pass ask the same peer again. The
+  owner stays retired, and another peer is asked once a slot is free, even
+  when the getdata window is already full.
+- **An extra racer on a later gap waits on the current owner's ask.** The
+  30s age was the time since the hash was first requested, so a peer asked
+  just now could look 30s old after an earlier owner was dropped.
+
+
+- **IBD no longer stalls on an undecodable block body.** A peer that
+  answered `getdata` with the real header and transactions that do not
+  parse left the body queued forever, so the honest copy was dropped and
+  confirm stopped at that height until restart. Intake now refuses such a
+  body and disconnects the sender, and lookup drops any queued row that
+  does not decode. The hash is requested again and is never marked
+  invalid.
+- **A block with Core's 10-byte empty transaction is invalid, not
+  undecodable.** Core reads an empty input list followed by segwit flag 0
+  as a transaction with no inputs and no outputs and rejects the block.
+  rbitcoin now decodes that encoding the same way and marks the block
+  invalid, instead of refetching it and dropping every peer that serves
+  it.
+
+
+- **A peer that asks for a block this node cannot serve gets `notfound`.**
+  Silence held that getdata until the 30s stall floor, so a lighter fork
+  peer could pin a heavier tip for two stall waits. An unknown hash, a
+  header-only row, and a pruned body are `notfound`. The peer is asked
+  again later: a `notfound` before they have the block is not a ban.
+
+
+- IBD enters tip mode once the proven header walk is at the confirmed tip
+  and every peer that advertised a taller `version.start_height` has failed
+  to extend it. One peer advertising a height no chain has no longer keeps
+  the node in IBD after the last block confirms.
+- A block announcement during IBD asks that peer for headers even when
+  its connect-time `version.start_height` is below the header walk. New
+  blocks found during a long catch-up are no longer ignored until tip
+  mode.
+- The `ibd: progress` percent, ETA, and `horizon=` count toward the header
+  walk tip or the tallest connected peer still on the walk. A disconnected
+  peer, or one that could not extend the walk, no longer sets the horizon.
+
+
+- **Coinbase maturity holds inside one confirm batch.** When a coinbase and
+  a transaction that spends it were in different blocks of the same write
+  batch (IBD, catch-up, or reorg connect), the 100-block maturity check
+  did not run, so a block that Bitcoin Core rejects with
+  `bad-txns-premature-spend-of-coinbase` was accepted. The batch now marks
+  each block's coinbase itself instead of reading `confirmed`, which is
+  not yet written for those heights.
+
+
+- **Index build refuses a parent or witness span past the published body.**
+  The block's own txout span was checked against the file end. A parent
+  txout, or a seqsigwit span for a P2TR output, was still read from the
+  slab after that end had moved backward.
+
+
+- **Scripthash index survives power loss.** Write-behind now syncs the
+  scripthash tables before advancing the durable inclusion watermark.
+  Before, an OS crash or power cut could leave the watermark claiming
+  outputs whose index bytes were lost, so those addresses' histories
+  stayed incomplete. DEBUG `tip: accept` is one JSON object; the sync
+  time is `sh.sync_ns`.
+- **Silent-payment tweak index survives crashes.** Each write is synced,
+  and on start the index is trimmed to the chain tip and its last record
+  checked. Before, a crash during a reorg could keep serving tweaks for
+  blocks no longer on the chain, and a power cut could turn tweaks into
+  "none" or make a height unreadable.
+
+
+- **`invalidateblock` activates the most-work remaining fork.** Candidates
+  were ranked by the work of their side branch alone, so an older, longer
+  fork could outrank an equal-work sibling of the new tip and leave the
+  node on the parent.
+
+
+- **`invalidateblock` of the tip honors `preciousblock` on an equal-work fork.**
+  The same tie rule as an ordinary reorg applies: more total work still wins,
+  then the precious branch, then the earlier held tip.
+
+
+- **Electrum and Esplora listen when `--sh-index` is off.** Address and
+  scripthash methods still fail closed. With the index on, the listeners
+  still wait until scripthash is caught up.
+
+
+- **Tip-follow does not punish a manual peer for misbehavior, as in Core.**
+  A `--connect` or `addnode` peer that sends an invalid block, an oversized
+  `inv`, `getdata` or `addrv2`, or a bad compact block stays connected and
+  its address is not refused. A mutated body during IBD still drops that
+  peer unless it is `noban`. Protocol violations that Core answers with a
+  plain disconnect, such as `sendaddrv2` after `verack` or a `tx` to a
+  `--blocks-only` node, still drop a manual peer.
+- **`addnode` opens no second session to a connected address.** `addnode
+  onetry` or `add` of an address with a live session, or one still being
+  dialled, dialled it again, and each dial that connected became its own
+  session. As in Core, the RPC now succeeds without dialling. A dial now
+  counts from the moment it is queued, so an `addnode` or `--connect`
+  redial right behind another dial to the same address adds nothing.
+
+
+- **A torn mempool sidecar no longer stops the node from starting.**
+  The 5-second admit persist and shutdown flush sync `tx.body` before
+  publishing `LIVE` slots, then sync slots before `meta`. Open keeps
+  transactions still inside the logical body and drops the tail. An
+  unreadable `meta` / `slots` / `tx.body` (bad magic, unknown schema, or a
+  payload that does not decode or whose txid does not match the slot) is
+  moved under `mempool/torn-<unix>/` and the node starts with an empty
+  mempool. `fee_history` stays in place.
+
+
+- **A replacement that pays the incremental minimum is no longer rejected for sharing a truncated sat/kvB bucket.** RBF requires a strictly higher true feerate, including when `fee × vsize` exceeds 2^64.
+- **Advertised minimums match the fee the mempool enforces.** `getmempoolinfo.minrelaytxfee` and Electrum `minrelaytxfee` follow `--min-relay-tx-fee`. `mempoolminfee`, Electrum `blockchain.relayfee`, and the BIP133 feefilter follow the live floor, including the near-full bump and its decay.
+- **An admission that evicts other transactions and then fails still publishes that higher floor.** `mempoolminfee`, Electrum `blockchain.relayfee`, and the feefilter update immediately, including when the failed transaction was the first member of a package.
+
+
+- **A lower `--min-relay-tx-fee` is the fee peers are told.** The rolling floor starts at the configured minimum. It no longer stays at the default 100 sat/kvB, so the BIP133 feefilter drops with `-minrelaytxfee` once the node leaves IBD. An eviction that already raised the floor still holds.
+
+
+- **Consensus: IBD marks a block that spends an unknown txid invalid.**
+  A block on the best header chain that spends a transaction the
+  connected chain does not have halted IBD as an engine fault, and the
+  hash was never marked invalid. Bitcoin Core rejects it with
+  `bad-txns-inputs-missingorspent` and follows another valid chain.
+  IBD now re-reads the block's parents once the block extends the tip
+  and the transaction index covers the chain, and marks the block
+  invalid when a parent is still missing. A parent the index lost after
+  a power loss is a store fault, not a verdict. A block whose parent
+  miss is a store fault goes back for one retry instead of stalling
+  IBD, and the check works right after a restart.
+
+
+- The nightly mutants job no longer stops when a batch catches every mutant, and it no longer fails by copying the cursor file onto itself.
+
+
+- A reconstructed tip block is announced as `cmpctblock` before connect to
+  peers who sent `sendcmpct` announce=1 and already have the parent. Peers
+  we only selected as compact sources no longer receive that announce.
+
+
+- **NixOS index options no longer crash-loop the node.** `scripthashIndex`,
+  Electrum, and Esplora pass `--sh-index`. `silentPaymentIndex` passes
+  `--sp-tweaks`. The old spellings were rejected at startup, and systemd
+  restarted the unit every 10 seconds.
+
+
+- **Consensus: a P2SH spend whose scriptSig leaves 1000 stack items is
+  invalid.** Core runs the P2SH scriptPubKey `HASH160 <20> EQUAL` on the
+  scriptSig stack, and its 20-byte push goes past the 1000-item stack
+  limit. We only compared the hash, so we accepted a spend that Core
+  rejects.
+
+
+- **A package is trimmed once, after every member is in.** A parent that is
+  under the fee floor alone is not evicted before its paying child commits,
+  so `submitpackage` does not answer `mempool full` for a package that fits.
+  A package that does not survive that trim is rolled back, so the conflicts
+  it replaced stay.
+
+
+- **A txid parent is requested after the same peer's wtxid window ends.**
+  Expiry matched the first announcement for that peer. When that row was
+  the waiting txid parent, the in-flight wtxid window stayed indexed and
+  no getdata followed.
+
+
+- **Esplora `after_txid` is 422 when that tx is not in the script's history.**
+  A cursor that exists somewhere else on the chain used to restart page 1.
+  `/txs`, `/txs/chain`, `/txs/summary`, the address routes, and a multi
+  POST now return `after_txid not found` and no rows.
+- **`estimatesmartfee`, `estimaterawfee`, and Electrum `blockchain.estimatefee`
+  use the 2-block rate for target 2.** Target 0 is still the next-block
+  horizon. Target 1 stays the 1-block rate.
+- **A shared orphan survives the other announcer's reserve.** Evicting
+  peer B drops only B. Peer A's copy is still delivered when the parent
+  arrives.
+- **A tip shrink clamps the spend-durable marker.** Open revalidation and
+  spend replay lower a marker that sits above the surviving tip, so a
+  later confirm still annotates spends. A checkpoint cannot publish the
+  pre-disconnect height over that clamp.
+- **A newest-first scripthash page stops at the page edge.** An unspent
+  tail no longer re-reads every older create.
+- **A tip or compact block with a repeated transaction pair is not a
+  block.** The merkle root can still match (CVE-2012-2459). Tip follow
+  disconnects that peer. Compact reconstruction returns the hash to
+  `getdata`.
+- **`submitblock` of a sibling that spends a coin the tip also spent is
+  inconclusive.** That header is not cached as `duplicate-invalid`.
+- **A refused local I2P SAM port does not rotate the session.** The dial
+  error is no longer classified as a dead `STREAM CONNECT`. A SAM reply
+  of `INVALID_ID` still is.
+- **Outbound dial keeps one onion or I2P seat when clearnet fills the
+  batch.** A dead overlay peer is recorded on its real address. An
+  unspecified version socket is not inserted into addrman.
+- **An Esplora singleflight join does not put an older scripthash back
+  over a newer last-1** for the same client. That includes a leader that
+  is still inside its handler when the newer script finishes, and a waiter
+  that resumes after it.
+
+
+- A store whose `meta` is older than schema 22, empty or occupied, refuses
+  with one wipe-and-IBD line before any table parser runs. Schema 22 and
+  later still open, including the `create.loc.ovf` widen, the header
+  size/weight rewrite, the inwit rename, and the `txstat` zero-extend.
+
+
+- **A block proposal whose fees do not fit in `u64` is rejected.** Output
+  totals, input totals, and the fee sum use checked addition. An overflowing
+  sum is `bad-txns-txouttotal-toolarge`, `bad-txns-inputvalues-outofrange`,
+  or `bad-txns-fee-outofrange` instead of a successful template check.
+
+
+- **`getblocktemplate` proposal mode rejects an immature coinbase spend.**
+  Spending this block's coinbase, or a coinbase still inside the maturity
+  window, is `bad-txns-premature-spend-of-coinbase` before fees are summed.
+  That spend no longer inflates the fee total returned to a template
+  provider, and it no longer hides `bad-cb-amount`. An output whose
+  creating transaction is no longer on the best chain is
+  `bad-txns-inputs-missingorspent` rather than a mature input. Structure
+  checks still run first.
+
+
+- **A block proposal with a failing script is rejected.** After the coinbase
+  amount check, proposal mode runs the block's script flags on the prevouts
+  it already resolved. No second parent decode and no UTXO write. P2SH and
+  witness sigops count toward the 80_000 block limit.
+
+
+- **Spentness is probed on the connected create.** `gettxout`, mempool accept,
+  the proposal check, and the Electrum and Esplora spent checks read the
+  spender slots of the row on the best chain; a newer never-connected row for
+  the same txid no longer hides a confirmed spend.
+
+
+- **Pure replace-by-fee-rate compares the full product.** A replacement whose
+  `new_fee * 4 * old_vsize` or `direct_fee * 5 * new_vsize` exceeds `u64`
+  is held to 1.25× in `u128`, instead of a saturating multiply that can
+  accept a rate below the rule.
+
+
+- **Regtest enforces BIP34 from height 1, like Bitcoin Core.** Regtest kept
+  rust-bitcoin's BIP34 height of 100000000, so a coinbase without the block
+  height push was accepted where Core rejects it.
+  `-testactivationheight=bip34@N` still moves the height. BIP30 stays
+  enforced on regtest, because regtest has no BIP34 hash.
+
+
+- **A spend of an output index past the parent's output count is a
+  block reject.** A block that spends `(txid, vout)` where `txid` is
+  confirmed, or created earlier in the same batch, but has no output at
+  `vout` is rejected with `bad-txns-inputs-missingorspent`, as in Core.
+  Before, load reported store corruption, IBD retried the block without
+  end, and the tip path cached a store error string as the reject reason.
+- **A store fault during tip connect or `submitblock` does not mark the
+  block invalid.** A store IO error or a store invariant failure is no
+  longer cached as an invalid block, and neither is a connect cancelled
+  by shutdown. Before, the valid block was refused for the rest of the
+  process. Consensus rejects are still cached. `submitblock` answers a
+  store fault, including one reading the parent or tip header or a
+  spent output, with RPC error `-25` (`RPC_VERIFY_ERROR`), as Core does
+  for `state.IsError()`.
+  A cancelled connect answers `inconclusive`, as Core does when
+  shutdown interrupts the block check. Consensus rejects still return
+  their BIP22 reason string.
+
+
+- **A failed replacement keeps the transactions it conflicted with.** If the new transaction does not stay in the mempool, one-transaction submit and package submit put those conflicts back, including a conflict under the fee floor and a parent that only paid its fee together with its child.
+
+
+- **Block header and block RPC match Bitcoin Core's JSON for inactive
+  headers, genesis, and difficulty text.** `getblockheader` and `getblock`
+  return a stored header that is no longer on the active chain
+  (`confirmations: -1`, its own `previousblockhash`, and a Class A body when
+  one exists). Genesis omits `previousblockhash`. `getblockheader` includes
+  `nextblockhash` and `target`. `getblockchaininfo` includes `bits` and
+  `target`. Difficulty uses 16 significant digits. `validateaddress` reports
+  `isscript` for P2TR and P2A and omits witness fields on pay-to-anchor.
+  `getmempoolinfo` includes `fullrbf`, `maxdatacarriersize` (null), and the
+  cluster limits. BTC amounts print as 8-decimal numbers.
+
+
+Script engine behaviour under policy flags now matches Core. Mempool
+admission does not change: it still runs with consensus flags only.
+
+- **NULLFAIL in witness v0 `CHECKMULTISIG` applies after the key walk.**
+  A P2WSH multisig signature that matches a later key is no longer
+  rejected when NULLFAIL is set.
+- **STRICTENC and WITNESS_PUBKEYTYPE check the pubkey for an empty
+  signature**, in `CHECKSIG` and in each `CHECKMULTISIG` pair checked.
+- **DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM matches Core.** Pay-to-anchor
+  and a v1 32-byte program before Taproot are exempt. P2SH-wrapped
+  v1+ programs are discouraged.
+- **P2WPKH applies LOW_S and the STRICTENC hashtype check** when those
+  flags are set, native and P2SH-wrapped.
+
+
+- **WITNESS and TAPROOT script flags apply on every block, as in Core.**
+  They no longer wait for the segwit or taproot height. Core's two
+  mainnet exception blocks keep their replacement sets: the BIP16
+  exception (170060) runs with no P2SH, WITNESS, or TAPROOT, and block
+  692261 runs without TAPROOT.
+  Witness sigops count on every block with the WITNESS flag. On a regtest
+  chain with a later `-testactivationheight=segwit@N`, a v0 witness
+  program spend below `N` is now held to the witness rules.
+- **P2PKH spends enforce the 520-byte push limit.** The P2PKH fast path
+  accepted a scriptSig push over 520 bytes (for example a pre-BIP66
+  signature with junk before the hashtype). It now falls back to the
+  interpreter, which rejects it as Core does.
+- **P2WPKH signatures follow the DERSIG flag.** The P2WPKH fast path
+  (native and P2SH-nested) required strict DER on every block. Core
+  applies strict DER to v0 witness signatures only when BIP66 is active,
+  and caps each witness element at 520 bytes. Both now match Core; this
+  shows on a regtest chain with dersig activated after segwit.
+
+
+- **`--sh-index` on an empty chain seals scripthash shards without reading
+  the empty ingest table.** That walk is 2^25 slots per shard and was
+  holding tip entry past the RPC cookie window.
+
+
+- A scripthash pass-1 MPHF without `scripthash.head/NN.packed` is not a durable head. Restart after `DONE.keys` resumes pass 2 and pack instead of reporting Electrum-ready on an index that has no multi-script history. A finished unmarked head is soft-migrated.
+- Electrum stays down when a durable scripthash head's inclusion floor is behind the tip, and the same process binds it once write-behind catches up. A cancelled extract names `scripthash.cold_progress` or `scripthash.unsorted` only when that path is on disk.
+- A tip append onto an unsealed pass-1 head no longer hides the packed multi-script chain. Packing the shard drops that ingest row once main owns the key.
+
+
+- **A signet block with no solution is checked against any challenge.** As
+  in Bitcoin Core, a coinbase commitment without the signet section spends
+  the challenge with an empty scriptSig and witness, and the challenge
+  script decides. Before, such a block was rejected unless the challenge was
+  exactly `OP_TRUE`.
+- **The signet commitment rewrite matches Bitcoin Core byte for byte.** A
+  zero-length `OP_PUSHDATA1/2/4` in the witness commitment is kept as its
+  bare opcode, and a push longer than 65535 bytes is re-encoded with
+  `OP_PUSHDATA4`. Before, the empty push became `OP_0` and the long push got
+  a truncated `OP_PUSHDATA2` length, so the modified merkle root and the
+  signet signature hash differed from Core.
+
+
+- **Block sigop cap includes 80,000.** Admission and template selection
+  allow a running cost of exactly 80,000, with `--block-reserved-sigops`
+  counted in that total. A cost that would pass 80,000 is still
+  `bad-txns-too-many-sigops`.
+
+
+- **A re-connected block records its spends of earlier-archived outputs.**
+  Confirm skipped the spent-slot read and annotation when a spend's parent
+  was created in the same run, trusting a Class A pre-fill. A parent stored
+  by an earlier batch (for example one rejected after its bodies were
+  stored, then re-driven after a reorg) never got that pre-fill, so the
+  slot stayed empty and a later block could spend the same output again.
+  Only outputs this batch's Class A append wrote now skip the read.
+- **A failed write after the tip commit no longer lets the next block
+  validate without its spends.** If a confirm write failed after the tip
+  advanced (for example in the spend annotate or the live index seal), the
+  next batch read spent slots that were never written and could accept a
+  double spend. The next write now replays the missing annotations first
+  and logs `confirm: replay spend annotations`. If that replay fails, the
+  batch is not validated.
+- **A reorg no longer lets the spend checkpoint claim heights it did not
+  annotate.** After a disconnect, `rbtc-spend-sync` could still publish the
+  snapshot height from before the reorg. If the reconnect had not finished
+  its spend annotate, a crash then reopened above those heights and did not
+  replay their spends. A disconnect now lowers the snapshot to the new tip,
+  a confirm write cannot raise it back over the tip, and the checkpoint
+  stays below any height whose spend annotate is still pending.
+
+
+- **A restart totals header work with two sequential reads of `header.body`.** One read ranks a stored side chain against the tip. The next fills chain work through the tip, from `nBits` alone. Catch-up finishes without a separate read of every header row. A header that arrives while that read is starting does not abort the search. A failed chain-work total does not keep a partial sum.
+
+
+- **`submitblock` runs CheckBlock before inputs when the parent is known.**
+  An equal-work sibling that fails CheckBlock is rejected and remembered.
+  A second submit is `duplicate-invalid`. A block that will not connect
+  used to be held as `inconclusive` when the failure was not in the cheap
+  input checks. A valid sibling stays `inconclusive`. Merkle and witness
+  mismatches are still not remembered.
+
+
+- **`submitblock` reports `bad-cb-height` for a wrong BIP34 coinbase
+  height.** It returned `bip34 height encoding`, which is not a Bitcoin
+  Core reason. The block is still remembered as invalid.
+- **A coinbase scriptSig shorter than two bytes is `bad-cb-length` once
+  BIP34 is active.** The height check ran first and reported the BIP34
+  failure. Bitcoin Core checks the length first.
+- **`submitblock` checks the merkle root before the transactions.** A
+  body the header does not commit to reported a transaction reason such
+  as `bad-cb-missing` or `bad-txns-duplicate`. It now reports
+  `bad-txnmrklroot`, as Bitcoin Core does.
+- **`submitblock` reports Bitcoin Core's reason for a repeated
+  transaction.** Every repeated txid was `bad-txns-duplicate`. Core keeps
+  that reason for a repeat that leaves the merkle root unchanged. A second
+  coinbase is now `bad-cb-multiple`, and any other repeat is
+  `bad-txns-inputs-missingorspent`.
+- **A transaction with no outputs or no inputs gets Bitcoin Core's reason.**
+  `submitblock` and the block reject log said `no outputs` and `no inputs`.
+  They now say `bad-txns-vout-empty` and `bad-txns-vin-empty`. The pre-check
+  applies that before comparing input and output values, so an empty input
+  list with an output is not `bad-txns-in-belowout`.
+- **A block that spends an immature coinbase reports
+  `bad-txns-premature-spend-of-coinbase`.** It said `coinbase immature`.
+  The pre-check reports the same reason before `bad-txns-in-belowout`, for
+  a same-block coinbase and for a confirmed coinbase inside the maturity
+  window.
+- **A cheap `submitblock` consensus reject is remembered.** A second submit
+  of that header is `duplicate-invalid`. A merkle mismatch and a mutated
+  duplicate are not remembered.
+- **A block over the weight limit reports `bad-blk-weight`.** It said
+  `block weight too large`.
+
+
+- **Tapscript validation is linear in script, witness, and input count.**
+  A leaf with deeply nested `OP_IF`s, many signature checks over a large
+  leaf script, annex, or SIGHASH_SINGLE output, or many script-path inputs
+  in a tx with large spent scriptPubKeys, cost quadratic CPU to validate,
+  so one relayed transaction or block could stall script checks. The IF
+  condition stack, the per-input sighash hashes, and the per-tx spent-output
+  hashes now follow Bitcoin Core. Accept and reject results are unchanged.
+
+
+- **Testnet3 BIP16 exception.** The testnet3 block Bitcoin Core exempts
+  from script checks (`00000000dd30457c…a432b105`) no longer enforces
+  P2SH, so full script validation accepts that historical block.
+- **Testnet3 default milestone is anchored.** The omitted `--milestone` on
+  testnet3 now requires Bitcoin Core's assumeutxo block at height 2500000
+  and Core's testnet3 minimum chain work before it skips scripts, like
+  mainnet. An omitted milestone previously checked every testnet script
+  and testnet had no default minimum chain work. A chain that does not
+  contain the anchor still checks every script. Testnet3 now uses Core's
+  default minimum chain work, which also gates IBD state, relay, and
+  low-work header handling until the chain reaches it.
+- **Testnet3 header batches after a min-difficulty block.** A header
+  within 20 minutes of a min-difficulty parent now takes the last
+  non-min-difficulty `nBits` even when that header sits earlier in the
+  same `headers` reply, as Bitcoin Core does. Before, the walk expected
+  the min-difficulty limit, rejected the batch, and dropped the peer.
+
+
+- **A miner can no longer get a valid block refused at the tip by first
+  sending a fake body for its header.** A body with no coinbase that holds
+  a 64-byte transaction can be the block's inner merkle nodes read as a
+  transaction, so it matches the header's merkle root. The tip path cached
+  that hash as invalid and then refused the real block. As in Bitcoin
+  Core, such a body is now a mutated block on the tip, P2P `block`,
+  compact block, and `submitblock` paths: a `block` message is dropped
+  and its peer punished, a compact block falls back to a full download,
+  and the hash is not marked invalid. `submitblock` also no longer caches
+  a mutated body (for example padded witness bytes) as an invalid block.
+  The IBD body path is covered by a separate change.
+
+
+- **Tip-follow picks the held branch with the most total chain work.**
+  Held side branches were ranked by work from their own fork point. A
+  later branch with more total work could lose a tie to an earlier
+  branch and never be tried. A branch that fails connect no longer
+  hides a lighter valid branch that still beats the tip.
+- **A failed block keeps the heavier valid part of its branch.** When a
+  block in a side branch fails connect, the node stays on the blocks
+  before it if they have more work than the old tip, as Core does. The
+  failure is no longer reported for the valid block that triggered the
+  reorg, so `submitblock` accepts it. The failed block itself is still
+  rejected.
+- **A side block's header is checked before the tip moves.** A sibling
+  of the tip that claimed more work with wrong `nBits` disconnected the
+  tip before it was validated and was not restored. `submitblock` and
+  compact blocks could rewind the tip this way, one block per sibling.
+
+
+- **`tx.head` no longer drops entries after a gap in Class A:** a confirm
+  write that appends its bodies and then rejects on the planned-fk check
+  leaves bodies the head never indexes. Segments rolled on entry count while
+  the seal re-reads an fk range, so such a gap made the next seal cover the
+  wrong range and lose that many real entries. IBD then halted on
+  `missing prevout (leftover … leftover_n=0)` at every restart. Segments now
+  own an fk span. Heads that already lost entries need `store/tx.head` moved
+  aside once, so open rebuilds it from Class A (#843).
+
+
+- **One peer is asked for an announced transaction.** A second
+  announcement of the same wtxid or txid waits. Disconnect or `notfound`
+  from the peer that was asked makes the waiting peer due. An inbound
+  announcement is still requested immediately.
+
+
+- **Mainnet no longer warns `Unknown new rules activated (versionbit 0)`,
+  `(versionbit 1)` and `(versionbit 2)`.** The unknown-bit check counted
+  blocks from genesis, so the CSV, SegWit and Taproot signalling periods
+  looked like unknown rules. As in Core, blocks below `MinBIP9WarningHeight`
+  (711,648 on mainnet, 2,013,984 on testnet3) no longer count, and mainnet
+  needs 1815 of 2016 blocks (90%) instead of 1512.
+
+
+- The Warnet kind image tag is the release `28.0.0` (not an rbitcoin
+  version). Helm `semverCompare ">=0.17.0"` is true for that tag, so the
+  chart writes `[regtest]` before the tank's RPC and `addnode` lines.
+  `0.7.99` and any prerelease of it compare below `0.17.0` and omit the
+  section. The compose example stays `rbitcoin-warnet:local`.
+- Lab tanks copy node log lines to stdout when `RBITCOIN_LOG_STDOUT=1`,
+  and the RPC proxy accepts Warnet's fork-observer `rpcauth` login for
+  its whitelisted chain methods while the tank `rpcpassword` user stays
+  unrestricted. A tank whose conf omits `head_scale` uses tiny heads
+  inside the lab image; `head_scale=mainnet` still selects mainnet heads.
+
+
+- **`getnetworkinfo`, `getblockchaininfo`, and `getmininginfo` answer
+  quickly again.** Their `warnings` check read every header since genesis
+  once per version bit on each call (about 4.7 s at mainnet tip). It now
+  keeps its place and reads each completed 2016-block period once.
 
 ### Changed
 
@@ -242,14 +1213,10 @@ before 1.0).
   shows the resolved address
   ([`docs/core-functional.md`](docs/core-functional.md)).
 
-- **Tor cookie HMAC uses `hmac` 0.13 and `sha2` 0.11** (digest 0.11).
-  Node `getrandom` is 0.4, matching the rest of the workspace. `bitcoin`
-  requirement is 0.32.102. Compatible lock bumps include `bitflags` 2.13.2,
-  `cc` 1.4.7, `hex-conservative` 0.2.3 / 1.3.0, `hyper` 1.11.1,
-  `smallvec` 1.16.1, `syn` 3.0.6, and `zerocopy` 0.8.57.
-  `bitcoin_hashes` stays 0.14 (`bitcoin` 0.32 requires it).
-  `tokio-tungstenite` stays 0.29 (axum 0.8). `getrandom` 0.2 and 0.3
-  stay for `rand_core`.
+- **Tor SAFECOOKIE HMAC is `bitcoin_hashes`.** There is no `hmac` or
+  `sha2` crate, and no `tokio-tungstenite` (Esplora has no WebSocket).
+  `bitcoin` is 0.32.102. `getrandom` 0.4 is the direct dependency;
+  `rand_core` still pulls `getrandom` 0.2.
 
 - **Pruned SH materialize is two-pass extract:** each collect worker owns a
   contiguous create-fk span and unsized maps capped at 1.5 GiB
@@ -279,42 +1246,22 @@ before 1.0).
   shard lines when each worker finishes. Previous `DONE` / 24 B `NN`
   unsorted is deleted and pass 1 restarts.
 
-- **PR cargo-mutants shards are required.** A finished non-zero
-  `cargo mutants` exit fails the check. A 30-minute kill with no `MISSED`
-  in the log warns and passes. `MISSED` already in that log fails the
-  shard. Under 400 changed lines, check `mutants (1/4)` runs the whole
-  in-diff set (`--shard 0/1`) and the other three exit 0. Check names are
-  `mutants (1/4)` through `mutants (4/4)`; `--shard` stays 0–3. Weekly
-  8-shard sweep is unchanged.
-
-- **CI short gates start together.** `fmt`, `deny`, `ast-grep`, and
-  `nixos-module-eval` no longer wait on each other. Script self-tests run
-  beside `cargo test`, so coverage is not stuck behind them.
-
-- **Weekly cargo-mutants:** `mutants.yml` — Sunday 8-shard `--workspace`
-  sweep. Must use `--workspace` (`default-members` is node). Snapshot
-  lists: [`docs/mutants/`](docs/mutants/). How to run:
-  [`TESTING.md`](TESTING.md).
-
 - **Electrum/Esplora no longer require `--sh-index` to bind.** Address and
   scripthash methods return `scripthash index disabled` (Electrum JSON-RPC
   error; Esplora HTTP 503). Txid/outpoint/block/fees work. Channel watches
   do not need Class B.
 
-- **Lightning chain backends (`Q-69` Open):** [`docs/lightning.md`](docs/lightning.md)
-  owns CLN `bcli` and ldk-node Esplora/Electrum.
-
-- **Schema 25 econ stems:** `txstat.body` stays 8 B/create: three ULEBs
-  (`fee_sat`/`base`/`wit_extra`) plus per-header remaining-byte overflow.
-  `n_in` is `input.loc` (u16). `input.body` is the parent edge (create fk
-  and vout) per input. `seqsigwit` is the old `inwit` stem (sequence,
-  scriptSig, witness); open renames those files. `txstat.*` and `input.*`
-  sit next to `seqsigwit` (cold when split). Open with no `input.loc`
-  backfills the edges from `seqsigwit` prevouts. A four-ULEB cell that
-  started with `n_in` is not rewritten; resync that datadir. Occupied 24
-  open rewrites `meta` and zero-extends `txstat.body` (no `txout.body`
-  rewrite). Unreleased leftover `txfixed.body` is unlinked. A 24 binary
-  refuses 25 `meta`.
+- **Schema 26 keeps the schema 25 econ stems.** `txstat.body` stays
+  8 B/create: three ULEBs (`fee_sat`/`base`/`wit_extra`) plus per-header
+  remaining-byte overflow. `n_in` is `input.loc` (u16). `input.body` is
+  the parent edge (create fk and vout) per input. `seqsigwit` is the old
+  `inwit` stem (sequence, scriptSig, witness); open renames those files.
+  `txstat.*` and `input.*` sit next to `seqsigwit` (cold when split).
+  Open with no `input.loc` backfills the edges from `seqsigwit` prevouts.
+  A four-ULEB cell that started with `n_in` is not rewritten; resync that
+  datadir. Opening schema 24 or 25 also shrinks `header.body` from 96 B
+  to 88 B and rewrites `meta` to 26. Leftover `txfixed.body` is unlinked.
+  A 25 binary refuses 26 `meta`.
 
 - **Core functional `mempool_packages.py`:** inventory `run`. Verbose mempool
   `vsize` / ancestor-descendant size use Core ceil-vsize; `wtxid` is on both
@@ -337,7 +1284,8 @@ before 1.0).
   `missingorspent`. `testmempoolaccept` missing prevouts are `missing-inputs`.
 
 - **Core functional `rpc_packages.py`:** inventory `run`. `submitpackage`
-  is still sequential `accept_tx` (not Core AcceptPackage). `conflict-in-package`
+  accepts each transaction on its own, then package-evaluates a min-relay
+  or orphan remainder of at least two (Core `AcceptPackage`). `conflict-in-package`
   and related package-error shapes match the official script. Non-OP_RETURN
   scripts over 10 000 bytes are `scriptpubkey`. `mempoolminfee` rises when live
   weight plus `MAX_STANDARD_TX_WEIGHT` exceeds the cap. The harness maps
@@ -352,7 +1300,9 @@ before 1.0).
   `testmempoolaccept` / `submitpackage` still reject those txs as RPC-submit
   only (same layer as `maxfeerate` / `maxburnamount`). Production
   `testmempoolaccept` package rows stay sequential. Production `submitpackage`
-  admits a 3-gen chain when fees/policy allow; a missing-inputs child stays
+  admits a 3-gen chain when fees/policy allow. A missing-inputs child that
+  package-evaluation can pair with its parents is admitted with that
+  remainder; a child that stays a lone orphan is still
   `bad-txns-inputs-missingorspent`.
 
 - **Q-68:** create.loc window SIMD (`deinterleave_pairs_u8x8`,
@@ -367,8 +1317,6 @@ before 1.0).
   challenge with primitives hex. `cfg(miri)` extra loops on those fns. Nightly
   `miri.yml` stays primitives-only (**Q-53**).
 
-- **Workspace version 0.7.99:** in-tree toward 0.8.0.
-  Published GitHub Releases remain 0.7.0; `v0.7.x` is the patch branch.
 - **Per-slice local CI:** each plan step runs the workspace suite after Green
   and the other required gates except coverage after Refactor, then commits
   before the next slice. Same *commands* as CI, not the GitHub Actions `env:`.
@@ -384,8 +1332,9 @@ before 1.0).
   the fee snapshot (no body clones). Unix `/internal` mempool-tx pages still
   lazy-build a published tx-body snapshot (≤ one extra live-pool of
   `Arc<Transaction>` + JSON `OnceLock`; dirty/singleflight; not FIFO/LRU).
-  Core RPC for that stack is unix `{datadir}/rpc.sock` plus the documented
-  mempool `socketPath` patch, not cookie/Basic. Address-prefix stays 404.
+  Core RPC for that stack is TCP plus `--rpc-cookie-file` (HTTP Basic,
+  alongside Bearer). The unix `{datadir}/rpc.sock` `socketPath` patch stays
+  optional. Address-prefix stays 404.
   Surface: [`COMPAT.md`](COMPAT.md).
 
 - **`getnetworkhashps` matches Core:** chainwork delta over min/max header
@@ -407,16 +1356,635 @@ before 1.0).
 
 - **Esplora HTTP SH join:** last-1 GET + last-bulk POST share 16 MiB packed/client
   (oversize last-1 is used for that request and not retained). Keyed by
-  `X-Rbitcoin-Client` (unix listen or TCP loopback; 30s idle; 256 clients).
-  Public TCP ignores the header. Not an 8-script LRU and not a >5s process
-  whale cache.
+  `X-Rbitcoin-Client` only on a unix socket or when join-header trust is
+  on (30s idle; 256 clients). Loopback alone is not trust. Public TCP
+  ignores the header. Not an 8-script LRU and not a >5s process whale
+  cache.
 
-- **Esplora wallet WebSocket:** `{ "action": "ping"|"init" }`, `track-*: "stop"`,
-  subscribe snapshots via `scripthash_mempool` (not a full tx-body scan), RBF
-  `address-removed-transactions`, and `want: stats` (`mempoolInfo` + `fees`
-  from the fee snapshot). Public URL `wss://host/api/ws`; mempool Node keeps
-  `/api/v1/ws`. REST and WS upgrade send
-  `X-Powered-By: rbitcoin-esplora/<version>-<hex>`.
+- **Esplora REST sends `X-Powered-By: rbitcoin-esplora/<version>-<hex>`.**
+  There is no wallet WebSocket. `/ws` and `/v1/ws` are 404.
+
+
+
+- **The API log truncates a large params body before copying it.** A
+  secret that overlaps the logged prefix is still redacted. A `submitblock`
+  body with no secret in that prefix is no longer copied in full on the
+  work-queue thread.
+
+
+- Connect names the sigop-cost cap and subtracts fees with checked
+  arithmetic. An output sum above `MAX_MONEY` is still rejected in
+  structure validation (`bad-txns-txouttotal-toolarge`) before that sum
+  is cast. Thanks to @Hero-Gamer.
+
+
+- **Block filters and silent-payment tweaks build as blocks confirm, or after a large gap.** With the index already at the tip, including a fresh sync, each block is built on the script pool after script verification and appended on the confirm write. At startup a gap through the tip of at most 2,016 heights (one IBD write drain: queue 14 × confirm cap 144) is sealed before confirm and live append turns on. A larger gap stays off the confirm path and is built after catch-up by `rbtc-idx-wb`, which logs `index: build` and reads stored chain data. Follow, relay, and Electrum do not wait for that build. Shutdown during it is prompt; the next start resumes. Enabling the index on an existing datadir does not stall IBD exit.
+- **Filters build on `--prune-seqsigwit` nodes.** They read output and
+  spent-prevout scripts from stored chain data, not reconstructed blocks.
+- **Filter storage is indexed.** Any height's filter is two reads; filter
+  hashes and headers are one. Writes are crash-consistent, and on open
+  slots for blocks no longer on the best chain are dropped.
+- **BIP157 serving matches Core on bad ranges.** `getcfilters` /
+  `getcfheaders` with start past stop, or more than 1000 / 2000 heights,
+  disconnect the peer instead of returning a clamped batch.
+- **`tip: accept`** is one JSON object. Filter time and lag are `bf_ns`
+  and `bf_lag`. There is no `tweaks=` field.
+
+
+- **Unreleased notes live in `changelog.d/`.** Feature pulls add one
+  fragment there and leave `CHANGELOG.md` alone. `release-cut.sh`
+  folds the fragments into `## [Unreleased]` and deletes them before
+  cutting the version section.
+
+
+- `--datadir-cold` is the append-only volume: `seqsigwit`, `txstat`,
+  `input`, and, once enabled, `blockfilter` and `sp_tweaks`.
+  `--prune-seqsigwit` still only drops historical seqsigwit and keeps
+  its 288-height window on the hot store. A split datadir that still
+  has `blockfilter.*` or `sp_tweaks.*` on the hot store refuses to open
+  until those directories are moved next to seqsigwit.
+
+
+- **`NODE_COMPACT_FILTERS` waits for the filters.** With
+  `--block-filter-index`, the node advertises compact filters only once
+  its filters first reach the tip, logging `blockfilter: caught up …`.
+  Before, it advertised from startup and answered filter requests past
+  its progress with silence while the first build ran. `getnetworkinfo`
+  now names `COMPACT_FILTERS` in `localservicesnames`.
+
+
+- **Master coverage JSON lists each production crate.** The Shields badge
+  stays the workspace total. `badges/coverage.json` also records per-crate
+  lines hit and found from that same run.
+
+
+- **Coverage LCOV floor 93%:** production `LH*100 >= LF*93` (was 92%). Green
+  master has stayed above that gate since 2026-10-06; `e3a8eb25` is 93.32%
+  (150469/161235). Still no never-falls ratchet.
+
+
+- **Workspace tests no longer sleep the two-minute `waitforblock` cap.**
+  The journey uses a short deadline and still returns the tip. The numeric
+  cap stays a unit test. Live P2P journeys in one process may overlap;
+  each script stage registers its thread and wakes with the others.
+
+
+- **Electrum subscription cap is 10000 per connection and configurable**
+  (`--electrum-max-subs N`, conf `electrum_max_subs=`, NixOS
+  `services.rbitcoin.electrum.maxSubs`). The old fixed 1000 refused an
+  ordinary Sparrow wallet mid-sync (`too many scripthash subscriptions`),
+  because a wallet subscribes every receive and change address up to its gap
+  limit. Per-event costs that grew with the subscription count are gone: a
+  mempool accept probes the subscription set with the tx's scripthashes; a new
+  block builds its touch set once (`Query::block_touch`) instead of reloading
+  the block and its prevouts per subscribed hash; requests move the sub sets
+  instead of cloning them; and unsubscribe drops its last-sent status exactly.
+  A reorg (or a tick gap > 32) still restatuses every subscription in full.
+
+
+- **A full RPC work queue answers HTTP 503 before the handler runs.**
+  The body is `Work queue depth exceeded`. The call is not paused.
+
+
+- **`estimatesmartfee` returns Core's result shape.** With an estimate:
+  `{feerate, blocks}`. Without one: `{errors: ["Insufficient data or no
+  feerate found"], blocks}` and no `feerate`, instead of `feerate: -1`.
+  The extra `errors: null` and `rbitcoin_model` keys are gone.
+  Like Core, `feerate` is at least `mempoolminfee`, so a full mempool
+  never gets a rate it would evict.
+
+
+- **Fee history survives restarts and is blended with live flow by
+  fullness.** The quote is `(1−α)·cold + α·warm`. α is decayed admitted
+  weight divided by about 1.44M WU (one block every 10 minutes, held in
+  a 150s half-life), clamped to 1. A quiet stretch decays α back toward
+  history. A missing warm side stays on history. Flow with no history
+  answers only at α = 1. The 1-block confirm-memory floor applies only
+  on the warm side. Historical windows still have to look like the
+  recent blocks, so an old fee spike does not hold estimates up for
+  months. Far history uses the 95% quantile, interpolated in log-rate
+  between hurdles. Flow confidence stays 99.9% at one block and 99%
+  farther out. A target without an answer is insufficient data. The
+  history is a snapshot plus a per-block journal in the mempool directory.
+
+- **Block fee history is read from `txstat`, not from this pool's own
+  transactions.** When relay turns on, the node walks back from the tip
+  through at most 1 GiB of `txstat` rows (fee and weight only; no spent
+  data and no tx bodies). Each block's sample is the vsize-weighted p10
+  of individual transaction rates at or above min relay. A block counts
+  even if this node never saw its transactions.
+
+
+- **Esplora fee answers keep the estimator's precision.** `/fee-estimates`
+  serves sat/vB to 0.001 (whole sat/kvB) instead of rounding to 0.1.
+- **Esplora no longer serves `/fees/recommended` or
+  `/v1/fees/recommended` (404).** Those are mempool.space's backend API
+  (`/api/v1/`), not Esplora's. Use `/fee-estimates`, or mempool's backend
+  in front of rbitcoin.
+- **Esplora no longer invents a 1 sat/vB fee.** `/fee-estimates` leaves
+  out targets the estimator cannot answer and returns **503** `fee
+  estimates unavailable` when none has an answer. Electrum `blockchain.estimatefee` keeps the protocol's `-1`.
+
+
+- Header look-ahead and the download-queue refill use one peer, the
+  lowest time to a first block byte among peers that have not failed the
+  walk. Other peers download blocks. A short reply that does not extend
+  the candidate moves that reservation. A block announcement from another
+  peer is one challenge: the reservation moves only when the reply beats
+  the candidate. One missed header ask moves the reservation; a second
+  miss disconnects. Less work does not disconnect.
+
+
+- Header look-ahead keeps one tip, one hash lookup, and one rewind.
+  `header.adopt` is the same file as before.
+- Writing a header batch does not spend the ask window of a lane that is
+  still waiting on its peer.
+
+
+- During IBD a peer may have 64 blocks in flight, or 16 MiB of estimated
+  block payload, whichever is reached first. The estimate is the median
+  size of recent bodies, and 1 KiB until eight bodies have arrived, so
+  early small blocks fill the count. The 1,024-block download window is
+  unchanged.
+
+
+- IBD makes a block eligible for another request when its last in-flight
+  peer disconnects, reports `notfound`, or loses ownership to a faster peer.
+
+
+- **Satisfied-block pruning judges each in-flight hash once.** The reader
+  set is then replaced with that decision, so a confirm between two passes
+  cannot leave the initial-block-download reader and the assign loop
+  disagreeing about the next body.
+
+
+- **Filters and tweaks share one builder while they are behind.**
+  `rbtc-idx-wb` reads each window once (io_uring, IOCP, or the macOS
+  pool) and builds both `--block-filter-index` and `--sp-tweaks` from
+  it. Progress logs as `index: build`. Once the index is live, each new
+  block is built on the script pool after script verification (one
+  filter job; tweak ranges of at most 32 transactions) and appended on
+  the confirm write. `NODE_COMPACT_FILTERS` is advertised when the
+  filter watermark passes the tip (`blockfilter: caught up`, or
+  `blockfilter: already at tip` when it already does).
+- **A missing spent output is an error, not an ineligible tx.** Tweak
+  computation used to skip a transaction whose spent output could not be
+  found; it now reports store corruption.
+
+
+- **Fee-flow buckets are a log grid from min relay through 1000 sat/vB.**
+  About 100 steps per decade. A 0.26 sat/vB inflow quotes its own step
+  instead of 0.2. Rates above 1000 sat/vB share one open bucket. The
+  inclusion search reads one suffix sum of those buckets.
+
+
+- Confirm lookup retires a fence-connected txid after each sealed head
+  segment. An unconnected identity still searches later segments.
+- Witness txid and sighash midstates are hashed from the block payload.
+  BIP143 double-SHA is filled on first use. BIP341 keeps the single SHA-256.
+- Lookup decodes the queued block frame in place. Load queue-depth bytes
+  are the header, the transaction count, and each transaction's wire length.
+
+
+- **Mempool expiry scans the oldest accepts first.** Each pass still visits
+  at most 256 live transactions. The headers poll skips the pass when that
+  index is busy, and still runs off the async worker.
+
+
+- **Mempool accept decodes a confirmed parent once per coin lookup.** Resolving
+  a spent coin reads the parent's packed outputs once; the fk resolve verifies
+  `txid.body` only and coinbase-ness comes from the block's first tx, not a
+  second decode of the parent's inputs. The `getblocktemplate` proposal check
+  shares that lookup and re-reads the create's fence height before spending
+  the cached output, so a disconnect during the check cannot price a coin
+  that has left the best chain. A failed coinbase-table read leaves the
+  mempool coin unavailable instead of treating it as a non-coinbase.
+
+
+- Linux CI test binaries are capped at 6 GiB of address space (`RBTC_TEST_AS_MB`). A mutant that allocates without bound dies in that process instead of shutting down the hosted runner.
+- The nightly mutants run is two 4 hour jobs again (8 hours total), starting at 00:47 UTC (17:47 Pacific during PDT). Each job still stops itself with 30 minutes of slack under the 6 hour hosted-job cap. The second job does not open another new-mutant window.
+
+
+- Mutants are a nightly workspace run, not a pull-request check. New
+  code is first in the queue, then a cursor walks older mutants. A
+  `MISSED` line is an artifact. It does not fail the night or the PR.
+
+
+- The nightly mutants job examines one source file per invocation, so
+  struct-field deletes are not retested across the whole workspace.
+  The checked-in mutants snapshot is gone; the night's artifact is the
+  miss list.
+
+
+- Nightly mutants skip `rbitcoin-bench`. It is an optional host client, not a test gate. `#[mutants::skip]` marks an expression that cargo-mutants will not report as missed.
+
+
+
+- The nightly mutants run starts at 00:47 UTC (17:47 Pacific during PDT) and keeps going for 8 hours, as two jobs so a hosted runner stays under its 6 hour cap. While new mutants and backlog mutants both remain, new batches stop once half of that job's budget has elapsed and the rest of the job walks the backlog. The second job does not open another new window after that half is used. Time the new queue does not use goes to the backlog.
+- The backlog cursor and `MISSED` lines are stored on the `mutants-state` branch, so they outlive the 14-day artifact. A failed push of that branch fails the run. `MISSED` does not.
+
+
+- Tests pin the index write-behind caught-up height, a resumed build
+  span, a short one-window tail, and that a pass held across the progress
+  interval logs the later window, and the header checkpoint an empty
+  rewind returns to.
+
+
+- **Contributor docs keep one owner per fact.** `AGENTS.md` points at the owner. Structure witnesses stay in `docs/consensus-tests.md`. The Hornet checklist cites those rows.
+
+
+- **A rejected peer transaction is one info line.** The line keeps the
+  Core `was not accepted` sentence and the `txrelay: reject` tag. The
+  extra debug line is gone.
+
+
+- **IBD and tip perf lines are one JSON object.** DEBUG `ibd: perf`,
+  `tip: perf`, and `tip: accept` each print a timestamped JSON object
+  (`ts` is unix milliseconds, zeros included) instead of hand-written
+  tokens. `ibd: sizes` and `ibd: perf_dbg` are gone; those counters are
+  fields on the `ibd: perf` object. `ibd: progress` and `tip: best` are
+  unchanged. A full IBD is every `ibd: perf` line in a debug log.
+
+
+- IBD parent pin no longer reads `input.loc` once per parent.
+  `txstat` fees are the ones assemble already checked, so connect
+  does not walk prevouts again to stamp them.
+
+
+- A held or pending block of exactly 4,000,000 bytes is parked; one byte
+  over is refused. The cap is the block count. Mempool meta is fsynced on
+  the meta file.
+
+
+- **`getblocktemplate` proposal mode prices the coinbase.** A proposal whose
+  coinbase pays more than the block subsidy plus fees is rejected as
+  `bad-cb-amount`, after the structure checks, as Bitcoin Core's
+  `TestBlockValidity` does. The check now lives on `ChainHub`
+  (`check_block_proposal`, returning the fee total) so other front ends
+  such as the SV2 template provider run the same code as the RPC.
+
+
+- **Packed body decodes are counted at the decode site.** The counter the
+  mempool and block-proposal pins read sits on the tx table's outs decoder, so
+  every per-fk decode is seen; the confirm write stage's full decoder is not
+  counted.
+- **Txid and spender resolution no longer decode the body.** Resolving a txid
+  to its row, probing whether an output is spent, and recording a spend read
+  the `txid.body` identity only; the packed decode runs only for a reader that
+  needs the record.
+- **A block proposal keeps only the parent outputs it spends.** The check
+  resolves each confirmed parent on the connected chain, decodes it once, and
+  holds only the spent outputs until it returns; a row that exists only in a
+  reorged-out block is not an input.
+
+
+- **A block proposal decodes each confirmed parent once.** `getblocktemplate`
+  proposal mode resolves a fan-out parent's fk once and decodes its packed
+  outputs once per check, not once per spending input.
+
+
+- Ship-version PRs now run overlay functional and the Warnet example
+  alongside Core functional, and `release-extra` fails unless all three
+  succeed.
+
+
+- **`getnetworkinfo.version` is `190000`.** That is Bitcoin Core 0.19.0's
+  client integer, so typed RPC clients take the modern response path.
+  `bitcoincore-rpc` `get_blockchain_info` otherwise requires the
+  pre-0.19 `bip9_softforks` map and fails on our object. The rbitcoin
+  semver stays in `subversion`. `protocolversion` stays `70016`.
+
+
+- **rust-bitcoin gaps are grouped as an upstream queue.** `docs/rust-bitcoin-limitations.md` lists the bitcoin 0.32.102 workarounds by who they hit. Three false-reject bugs are filed (RB-004, RB-015, RB-019). The rest of that queue is not.
+
+
+- `getblocktemplate` and the SV2 Template Provider select transactions as
+  the mempool's own shared bodies instead of copying every selected
+  transaction on each call.
+
+
+- **Store open unlinks `scripthash.runs` leftovers except `SEAL`.** The
+  sorted-run writer and header parser are gone. Tip materialize does not
+  write those files. A missing runs directory still opens. Open fails if a
+  leftover cannot be read or removed. Resume a cancelled scripthash
+  materialize from `scripthash.unsorted` or `scripthash.cold_progress`.
+
+
+- During IBD, confirm does not flush spend annotations or the Class A
+  bodies replay reads. `rbtc-spend-sync` syncs those files about every
+  10 minutes and records that pre-sync snapshot in `spend_durable`.
+  Shutdown does one sync at the latest snapshot before the tip flush.
+- Opening a store with no `spend_durable` file revalidates and replays
+  spends from genesis. A present file is the cursor open rechecks above.
+  A cookie inside a data file, or a clean page cache, is not that cursor.
+
+
+- Spend annotation replay logs height progress every 10 seconds.
+
+
+- **`--sp-tweaks` and `--prune-seqsigwit` are refused together.** Tweaks
+  read input public keys from scriptSig and witness data, which pruning
+  drops. The node now refuses the pair at startup, refuses to enable
+  pruning while tweaks are on (and tweaks on a datadir that was pruned),
+  and a pruned node answers tweak requests with an error instead of
+  computing them from data it claims not to keep.
+
+
+- Confirm write reuses the spentness scratch across blocks in a batch
+  and passes those annotate slots through without copying them into a
+  second edge list.
+
+
+- Linux CI and nightly mutants run test binaries with a private `TMPDIR`
+  on `/dev/shm` (`scripts/tmpfs-test-runner.sh`). Store fsyncs no longer
+  dominate suite wall time. The two `sp_tweaks` u32-roll tests no longer
+  allocate 4–5 GB of disk each.
+
+
+- Confirm stamps txstat size from the lookup precompute instead of walking
+  each transaction again on the write thread.
+- New `header.body` rows are 88 bytes. Opening a schema 24 or 25 store strips
+  the old size/weight tail. Block size and weight are summed from txstat.
+
+
+- **Wire confirm encodes scriptSig and witness once.** The write plan no
+  longer keeps a second copy. Commit writes those bytes from the wire
+  transaction and the spend edges. A records row that arrives with no inputs
+  is still corrupt.
+- **Script checks borrow spent scriptPubKey bytes.** Same-block spends read
+  the wire block on the job. Historical spends read the parent pin. Taproot
+  sighash hashes those borrows and does not build a second output.
+- **Pruned nodes keep confirmed inputs from the wire transaction.** Connect
+  serves the seqsigwit RAM window from that commit cache instead of reading
+  each transaction back.
+
+
+- Confirm write collects each block's spend absolute offsets once, reuses
+  the structural scratch and the in-batch double-spend set, and looks up
+  create heights by foreign-key span when every block in the batch is
+  contiguous. The tip event carries the wire header already validated on
+  the write path.
+
+### Added
+
+
+- Nightly fuzz compares script verification and chain-review shapes with
+  Bitcoin Core: policy and pre-activation flag words in-process, and hub
+  submits for milestone, genesis, BIP30, maturity, BIP68, mutation, and
+  reorg respend.
+
+
+- Nightly fuzz executes a structured script grammar. Our verifier has a
+  100 ms thread-CPU budget, confirmed by a second sample. Seeds come from
+  Core `script_tests.json` or the committed fixture when that file is
+  absent. A same-hash mutant is replayed as the honest block only after
+  both sides reject it. A full compact reconstruct follows the honest body
+  through `drain_pending_now` and scores that body against Core without
+  invalidating the hash first. P2P sequences are tagged steps. Tx compares
+  on the hub mempool. Empty getheaders, feefilter, and inv are not Core
+  comparisons; a local drop on feefilter or inv fails the input. Sunday
+  runs block-spend under ASan with a 90 s input timeout. `store_reorg`
+  drops its hub and reopens the same datadir once per input. The tip hash
+  must match. It does not ask Core.
+
+
+- **Health probes.** `--health-listen [ADDR]` (default `127.0.0.1:9332`)
+  binds before the store opens and serves `GET /healthz` (200 in every
+  phase) and `GET /readyz` (200 once the node follows the tip with every
+  configured listener up, the tip within 6 blocks of the best header, the
+  tip fresher than `--max-tip-age`, and the scripthash index within 6
+  blocks of the tip; otherwise 503 with the reason). The stale-tip check
+  does not latch like `initialblockdownload`, so a node that loses every
+  peer after IBD goes unready. RPC, Electrum, and Esplora bind only after
+  catch-up, so a probe on those would restart a node in the middle of a
+  migration or IBD.
+- **Prometheus metrics.** `--metrics` adds `GET /metrics` on the health
+  listener. Gauges equal their RPC fields (`blocks`, `headers`,
+  `initialblockdownload`, connections, mempool size). Counters are the
+  `tip: perf` meters (Esplora and Electrum requests, historical block
+  serves, mempool accepts and rejects), which now count up for the life
+  of the process; the 5 s DEBUG line still prints the change since the
+  previous line.
+
+
+- **More Prometheus gauges.** `/metrics` also exposes verification progress,
+  tip age, difficulty, peer counts by network, outbound time offset, P2P
+  byte totals, and mempool min fee (sat/vB), weight cap, orphans, and
+  unbroadcast count. Fee rates on this scrape are sat/vB. The Core RPC
+  fields stay BTC/kvB.
+- **NixOS health and metrics.** `services.rbitcoin.health.enable` passes
+  `--health-listen` (default `127.0.0.1:9332`). `services.rbitcoin.metrics`
+  passes `--metrics` and adds a Prometheus scrape job when
+  `services.prometheus.enable` is set.
+
+
+- **`GET /progress` on the health listener.** JSON for the long stage
+  running now (`tx.head` rebuild and tail backfill and input backfill
+  while the store opens; the scripthash index build passes while
+  indexing; the block filter and silent payment tweak index builds,
+  each counted in heights): `phase`, `stage`, `done`, `total`, `percent`,
+  `elapsed_secs`, and a linear `eta_secs`, plus `finished` for the stage
+  that ended last, at any `--log-level`. `--metrics` exports
+  `rbitcoin_progress_done` / `_target` / `_start_time_seconds` with a
+  `stage` label. `/readyz` is unchanged. The `tx.head` rebuild now counts
+  each sealed range as it lands; its INFO line still prints only at the
+  end.
+
+
+- **Initial block download can see the header chain before those blocks are downloaded.** The 64,000-block download queue stays full. Headers past it are checkpoints in `header.adopt` (hash, height, total work, the last header of each reply, and the difficulty period at that hash), not rows in `header.body`. One competing chain is kept the same way until its work passes the candidate, including when that takes more than one reply. An explicit `--milestone HEIGHT` skips scripts by height. The default mainnet milestone skips only when the header path has block 840,000's hash at that height, this block is the path hash at its own height, and chain work meets the minimum. A short refill that continues the queue is stored. A short reply on a proven walk already above the work floor is not. A chain that dies before the floor is abandoned. A heavier chain replaces the checkpoints, including one that forks from a header already stored between checkpoints, and one that forks from a confirmed ancestor while that ancestor is still below `-minimumchainwork`. Script skip follows the chain that wins. A peer that delivers more than 4,000 stored headers off the download path, below the work floor, is disconnected. A look-ahead that breaks the proof-of-work rules disconnects that peer. `header.adopt` records the block the checkpoints were built on; a restart ignores the file when that height has a different hash, and a reorg below it deletes the file. An older `header.adopt` does not parse, so its checkpoints are not restored. Queued headers that link from the confirmed tip are still noted, and that can turn script skip back on.
+
+
+- **Core cookie auth on TCP RPC:** `--rpc-cookie-file PATH` (conf
+  `rpc_cookie_file=`, NixOS `services.rbitcoin.rpc.cookieFile`) accepts an
+  existing Core-format `username:password` file as HTTP Basic on the TCP
+  listener, alongside the Bearer token, so stock mempool `CORE_RPC.COOKIE`
+  authenticates without a patch; the unix-socket `socketPath` patch is now
+  optional. The node never creates the file. It must have no trailing
+  newline (mempool sends the raw bytes, so one would 401 forever) and needs
+  `--rpc-listen`; either mistake fails the launch. The TCP 401 challenge is
+  `Basic` when a cookie is configured, `Bearer` otherwise.
+- **Core-shaped confirmed transaction JSON:** confirmed verbose
+  `getrawtransaction` adds `confirmations`, `blockhash`, `blocktime`, and
+  `time`. This also fixes the coinbase input in `getrawtransaction` /
+  `decoderawtransaction` / `getblock` verbosity 2: it is now
+  `{"coinbase": <hex>, "sequence": n}` (plus `n`) instead of a
+  `txid`/`vout` pair that never existed. mempool needs both to index
+  blocks.
+- **No panic reading a table during disconnect:** `ArrayTable::get`
+  checked the length before taking its read lock, so a concurrent
+  truncate (block disconnect) could panic a reader such as an RPC
+  `header_at_height` lookup. It now re-checks under the lock and reads
+  the shorter table.
+
+
+- **`--rpc-socket PATH` (conf `rpc_socket=`).** Binds the unix JSON-RPC
+  socket at PATH with mode 0660 instead of `{datadir}/rpc.sock` (0600).
+  A client running as another user in rbitcoin's group, such as
+  mempool's Node, can connect without reaching into the 0700 datadir.
+  Implies `--rpc`. `rbitcoin-cli --rpc-socket PATH` talks to it.
+  NixOS: `services.rbitcoin.rpc.socketPath` (directory created 0750).
+
+
+- **Stratum v2 Template Provider.** `--sv2-tp-listen ADDR` serves the
+  SV2 Template Distribution Protocol over Noise. A JDC or pool gets a
+  template on every tip, can fetch its transactions, and can submit a
+  solved block, which the node accepts like any other block.
+  `--sv2-tp-authority-sec-file` (or `--sv2-tp-authority-sec`) sets the
+  signing key. `--sv2-tp-cert-validity` and `--sv2-tp-stale-grace` tune
+  the certificates and old-tip templates. NixOS:
+  `services.rbitcoin.sv2.tp.*`. Default off.
+
+
+- **SV2 TP build counters.** With `--sv2-tp-listen`, `/metrics` exports
+  `rbitcoin_sv2_fee_checks_total`, `rbitcoin_sv2_template_builds_total`,
+  and `rbitcoin_sv2_template_build_seconds_total`, and the DEBUG
+  `tip: perf` JSON gains `sv2_checks`, `sv2_builds`, `sv2_build_avg_us`,
+  and `sv2_build_max_us`.
+
+
+- **SV2 TP fee-gain templates.** With the tip unchanged, a session gets a
+  new template once its fees gain `--sv2-tp-fee-delta` sats (default
+  1000) over the last one sent, checked every
+  `--sv2-tp-template-interval` seconds (default 5). NixOS:
+  `services.rbitcoin.sv2.tp.{feeDelta,templateInterval}`.
+
+
+- **Wallet and Lightning backend guide.** `docs/wallets.md` lists which
+  wallets speak Electrum, Esplora, or the RPC cookie, including Wasabi's
+  full-node path. `docs/lightning.md` covers CLN, ldk-node, and LND
+  `rpcpolling` versus Neutrino and ZMQ.
+
+
+### Removed
+
+
+- **Esplora WebSocket (`/ws`, `/v1/ws`).** It copied mempool.space's
+  `/api/v1/ws`, which is mempool's backend surface; Esplora and electrs
+  have no WebSocket. Both paths now 404. Watch wallets over Electrum
+  subscriptions, or run mempool's backend in front of this Esplora.
+  `EsploraConfig` drops the `max_ws_*` / `max_track_*` caps and
+  `run_esplora` drops its tip-broadcast argument.
+
+
+### Security
+
+
+- **A lost spend-edge tail is no longer spendable after restart.** If the
+  parent-edge bytes for confirmed outputs are short or zeroed, reopen does
+  not publish those outputs as unspent. The tip moves back past the first
+  such output, or the node refuses to start. A checkpoint that saw a
+  disconnect does not publish through the replacement block at that height.
+- **A peer that never reads cannot pin compact-block transaction serving.**
+  `getblocktxn` waits on the same send budget as other served blocks, and
+  `blocktxn` is charged by its real size. The reconstruct runs off the
+  peer task.
+- **Mempool eviction drops the relay indexes with the transaction.** Fee
+  and slot-table eviction, expiry past a run of already-removed entries,
+  and a rolled-back package or one-parent package clear the scripthash,
+  expiry, and wtxid maps for every transaction that left, including one
+  the rolled-back member had evicted. A prioritisation delta stays until
+  the transaction is mined, including when it had already left the mempool
+  and when relay is still off. A reorg removes a parent and its children
+  before a template can select the child. A coin that is spent while its
+  script is checked is not admitted. That recheck reads the coin before
+  taking the mempool write lock, unless a block connect or disconnect is
+  changing spentness.
+- **Bad compact blocks and oversized transaction counts are refused before
+  the expensive work.** Once the tip meets minimum chain work, a
+  `cmpctblock` with bad proof of work is scored like a bad block. It does
+  not scan the mempool or update that peer's header state. A `tx`,
+  `block`, `cmpctblock`, or `blocktxn` whose witness count cannot fit in
+  the payload is misbehavior. Those four relay messages are walked twice
+  — inputs, outputs, and witnesses — before `consensus_decode`. IBD block
+  frames skip that pre-walk. `merkleblock` is ignored.
+- **Electrum mempool status no longer runs on the connection.** With
+  Electrum enabled, a mempool payment or replacement of a subscribed
+  scripthash still pushes the new status, and the history join is off the
+  session task.
+
+
+- A fuse8 segment length that is not a power of two is rejected as corrupt.
+- A var-table or create.loc read past the published end is corrupt.
+- Dropping an undrained io_uring session fails closed instead of freeing
+  buffers a completion may still own. The drain hard cap is unchanged.
+- A sorted-run manifest or txstat blob longer than the file is corrupt
+  and is not allocated.
+- The datadir `.lock` is created mode 0600 and is not followed if it is
+  a symlink.
+- Pool write jobs read the caller buffer through a shared slice.
+- Findings write-ups: 067, 068, 069, 070, 071, 072.
+
+
+- Omitted `--milestone` on testnet checks every script. An explicit
+  `--milestone HEIGHT` stays height-only, and omitted mainnet stays
+  anchored. NixOS `services.rbitcoin.milestone` passes the flag when set.
+- An empty median-time window is an error. A height-0 BIP68 time lock
+  uses the genesis median.
+- The version nonce comes from the CSPRNG. The recent-reject set and the
+  invalid-hash set stop at 4096 entries instead of clearing.
+- Mempool expiry walks at most 256 entries per call and also runs on the
+  headers poll, so a quiet pool still expires.
+- A tip-follow pending block or held body larger than 4,000,000 bytes is
+  not parked. One peer's orphans stay within that peer's reserve.
+- `StoreSecret` and RPC auth debug output is redacted. `store.secret`
+  and the API log are created mode 0600. A Tor control password that
+  contains CR, LF, or NUL is refused, and passing it on the command
+  line warns once. A conf error names the file and line and does not
+  echo the raw line. A group- or world-readable RPC cookie warns once.
+- Findings write-ups: 073, 074, 075, 076, 077, 078, 079, 080, 081, 082, 083.
+
+
+- Thanks to Stephan Livera for the 2026-10-02 review of P2P resource
+  accounting, inbound eviction, REST, and silent-payment logging.
+  Status board: docs/external_findings/052-livera-review-index.md.
+
+
+- Inbound eviction keeps a share of the longest-connected peers and
+  disconnects the newest peer in the largest netgroup. The netgroup is
+  fixed when the peer is accepted.
+- A misbehavior disconnect refuses that address for one day, in memory
+  only. Rate-limit, oversize, and score-threshold exits record the same
+  refusal. A loopback peer is disconnected and is not recorded, so one
+  local failure does not block every other local connection. During
+  initial download, that death cools the dial even after a block body. A
+  netgroup that just lost an inbound slot waits ten minutes. The set
+  does not grow past its cap.
+- During initial download, only a block this node requested moves the
+  stall clock or is queued. Other frames are rate-limited. Light
+  decodes do not wait on the reader.
+- Findings write-ups: 060, 061, 062.
+
+
+- Cap the parent-request tracker per peer and process-wide. A full
+  process-wide table skips the new announcement and does not disconnect
+  the peer. Only a peer at its own cap is disconnected. A wtxid
+  announcement is re-requested as a wtxid and does not change another
+  peer's txid parent. While that request is in flight, the same hash is
+  not asked again as a txid.
+- Charge outbound getdata and tx announcements against the per-peer send
+  budget, and stop serving blocks once that budget is already over.
+- The per-peer rate window keeps the previous second so a boundary does
+  not grant a second full budget.
+- Count v2 decoy packets and unknown message types in the per-peer rate
+  window on tip-follow and IBD. One decoy that does not fit adds the
+  rate-limit score. The peer is disconnected at the same threshold as
+  other frames.
+- Batch mempool transaction announcements into one inv per thousand,
+  still charged against the per-peer send budget.
+- Findings write-ups: 053, 054, 055, 056, 057, 058, 059.
+
+
+- `/rest/` on the RPC listener is off unless `--rest` or `rest=` is set.
+  It uses its own queue, and the body is read before that permit is taken.
+- A silent-payment subscribe scans at most the recent 256-block window,
+  including when the client passes a start height. The scan stops when
+  the client hangs up.
+- RPC waits are capped at two minutes inside the handler, so a long-poll
+  that hits the cap still returns a JSON-RPC body. The listener drops a
+  new connection once 256 are open. A long-poll does not hold a
+  work-queue slot.
+- API logs strip `xprv` / `tprv` material and silent-payment scan secrets.
+- Findings write-ups: 063, 064, 065, 066.
 
 ## [0.7.0] — 2026-09-18
 
