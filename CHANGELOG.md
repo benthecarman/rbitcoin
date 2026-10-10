@@ -9,6 +9,11 @@ before 1.0).
 
 ## [Unreleased]
 
+### Changed
+
+- **Workspace version 0.8.99:** in-tree toward 0.9.0.
+  Published GitHub Releases remain 0.8.0; `v0.8.x` is the patch branch.
+
 ## [0.8.0] — 2026-10-09
 
 Named published **0.8** line. **Not 1.0.** Patch branch is `v0.8.x`. Schema 26
