@@ -72,8 +72,9 @@ fn outcome_from(
     }
 }
 
+/// One steal chunk shares one Schnorr / Taproot tweak batch.
 fn apply_script_chunk(jobs: &[ScriptCheckJob]) -> Result<(), ConsensusError> {
-    jobs.iter().try_for_each(verify_one_script_job)
+    crate::script::batch::batched(|| jobs.iter().try_for_each(verify_one_script_job))
 }
 
 struct Inflight {

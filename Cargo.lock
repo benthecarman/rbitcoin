@@ -922,6 +922,7 @@ dependencies = [
  "rbitcoin-log",
  "rbitcoin-primitives",
  "rbitcoin-query",
+ "rbitcoin-secp256k1-batch",
  "rbitcoin-store",
  "ruzstd",
  "serde_json",
